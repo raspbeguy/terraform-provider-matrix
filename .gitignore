@@ -1,0 +1,8 @@
+terraform-provider-matrix
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+testbed/
+dist/
+coverage.out

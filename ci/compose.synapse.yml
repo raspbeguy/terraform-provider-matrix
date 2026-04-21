@@ -1,0 +1,25 @@
+services:
+  synapse-generate:
+    image: matrixdotorg/synapse:latest
+    command: generate
+    environment:
+      - SYNAPSE_SERVER_NAME=localhost
+      - SYNAPSE_REPORT_STATS=no
+    volumes:
+      - synapse-data:/data
+
+  synapse:
+    image: matrixdotorg/synapse:latest
+    depends_on:
+      synapse-generate:
+        condition: service_completed_successfully
+    environment:
+      - SYNAPSE_SERVER_NAME=localhost
+      - SYNAPSE_REPORT_STATS=no
+    volumes:
+      - synapse-data:/data
+    ports:
+      - "8008:8008"
+
+volumes:
+  synapse-data:

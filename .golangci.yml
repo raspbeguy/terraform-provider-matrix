@@ -1,0 +1,24 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - misspell
+    - gocritic
+    - revive
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+          disabled: true  # the tfsdk layer has many unexported models; too noisy for now
+
+issues:
+  max-same-issues: 0
