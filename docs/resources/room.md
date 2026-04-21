@@ -43,3 +43,14 @@ resource "matrix_room" "example" {
 
 - `canonical_alias` (String) Canonical alias currently set on the room.
 - `id` (String) Matrix room ID (!abc:server).
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import by room ID (starts with !, ends with :homeserver).
+tofu import matrix_room.example '!abcDEF:example.com'
+```

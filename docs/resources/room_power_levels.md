@@ -60,3 +60,14 @@ resource "matrix_room_power_levels" "example" {
 ### Read-Only
 
 - `id` (String) Equal to room_id.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import by room (or space) ID. Power levels are a singleton on the room.
+tofu import matrix_room_power_levels.example '!abcDEF:example.com'
+```

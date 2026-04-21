@@ -30,3 +30,14 @@ resource "matrix_room_alias" "example" {
 ### Read-Only
 
 - `id` (String) Equal to alias.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import by the full alias (including leading #).
+tofu import matrix_room_alias.example '#team-general:example.com'
+```

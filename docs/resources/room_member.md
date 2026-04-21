@@ -36,3 +36,14 @@ resource "matrix_room_member" "invite_bob" {
 ### Read-Only
 
 - `id` (String) Composite ID: <room_id>|<user_id>.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Composite ID: <room_id>|<user_id>
+tofu import matrix_room_member.example '!abcDEF:example.com|@alice:example.com'
+```

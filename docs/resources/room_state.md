@@ -37,3 +37,18 @@ resource "matrix_room_state" "history_world_readable" {
 ### Read-Only
 
 - `id` (String) Composite: <room_id>|<event_type>|<state_key>.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Composite ID: <room_id>|<event_type>[|<state_key>]
+# State key is optional; defaults to "" (empty) for events like m.room.pinned_events.
+tofu import matrix_room_state.example '!abcDEF:example.com|m.room.pinned_events'
+
+# With an explicit state_key (e.g. m.room.member keyed by mxid):
+tofu import matrix_room_state.other '!abcDEF:example.com|m.room.member|@alice:example.com'
+```

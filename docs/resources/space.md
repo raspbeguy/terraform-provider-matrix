@@ -41,3 +41,15 @@ resource "matrix_space" "example" {
 
 - `canonical_alias` (String) Canonical alias currently set on the room.
 - `id` (String) Matrix room ID (!abc:server).
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Import by space/room ID. A space is imported the same way as a room —
+# the creation_content.type on the server determines whether it's a space.
+tofu import matrix_space.example '!abcDEF:example.com'
+```

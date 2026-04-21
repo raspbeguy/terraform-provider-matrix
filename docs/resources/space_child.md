@@ -39,3 +39,14 @@ resource "matrix_space_child" "example" {
 ### Read-Only
 
 - `id` (String) Composite ID: <parent_space_id>|<child_room_id>.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Composite ID: <parent_space_id>|<child_room_id>
+tofu import matrix_space_child.example '!parentSpace:example.com|!childRoom:example.com'
+```

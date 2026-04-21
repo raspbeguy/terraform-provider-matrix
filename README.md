@@ -104,6 +104,23 @@ with:
 make docs
 ```
 
+## Importing existing rooms & spaces
+
+Every resource supports `tofu import` for adopting state you already have on
+the homeserver without recreating it:
+
+```bash
+tofu import matrix_room.example '!abcDEF:example.com'
+tofu import matrix_space.team '!xyzGHI:example.com'
+tofu import matrix_space_child.general '!xyzGHI:example.com|!abcDEF:example.com'
+tofu import matrix_room_member.alice '!abcDEF:example.com|@alice:example.com'
+tofu import matrix_room_power_levels.general '!abcDEF:example.com'
+tofu import matrix_room_alias.extra '#team-general:example.com'
+tofu import matrix_room_state.pins '!abcDEF:example.com|m.room.pinned_events'
+```
+
+See each resource's docs page for the exact ID format.
+
 ## Development
 
 | Target | What it does |
