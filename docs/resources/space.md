@@ -28,6 +28,7 @@ resource "matrix_space" "example" {
 
 - `avatar_url` (String) Avatar mxc:// URI (m.room.avatar).
 - `encryption_enabled` (Boolean) If true, enable end-to-end encryption at creation time. Cannot be disabled once set.
+- `history_visibility` (String) Controls who can read the timeline: joined | invited | shared | world_readable. If unset, reflects the homeserver's default. Updatable after creation.
 - `initial_invites` (Set of String) User IDs to invite during room creation. Subsequent changes are ignored — use matrix_room_member.
 - `is_direct` (Boolean) Mark the room as a direct chat.
 - `name` (String) Room name (m.room.name).

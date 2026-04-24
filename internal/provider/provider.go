@@ -130,6 +130,8 @@ func (p *matrixProvider) Resources(_ context.Context) []func() resource.Resource
 		NewRoomPowerLevelsResource,
 		NewRoomAliasResource,
 		NewRoomStateResource,
+		NewRoomJoinRulesResource,
+		NewRoomServerACLResource,
 	}
 }
 

@@ -3,20 +3,23 @@ package provider
 import (
 	"context"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"maunium.net/go/mautrix/id"
 )
 
 var (
-	_ resource.Resource                = &roomResource{}
-	_ resource.ResourceWithConfigure   = &roomResource{}
-	_ resource.ResourceWithImportState = &roomResource{}
+	_ resource.Resource                   = &roomResource{}
+	_ resource.ResourceWithConfigure      = &roomResource{}
+	_ resource.ResourceWithImportState    = &roomResource{}
+	_ resource.ResourceWithValidateConfig = &roomResource{}
 )
 
 type roomResource struct {
@@ -61,6 +64,15 @@ func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Optional:      true,
 				Description:   "Directory visibility: public | private.",
 				PlanModifiers: forceNewStr,
+			},
+			"history_visibility": schema.StringAttribute{
+				Optional:    true,
+				Computed:    true,
+				Description: "Controls who can read the timeline: joined | invited | shared | world_readable. If unset, reflects the homeserver's default. Updatable after creation.",
+				Validators: []validator.String{
+					oneOfString{"joined", "invited", "shared", "world_readable"},
+				},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"room_version": schema.StringAttribute{
 				Optional:      true,
@@ -170,4 +182,33 @@ func (r *roomResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 func (r *roomResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+func (r *roomResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	if !r.isSpace {
+		return
+	}
+	var m roomLikeModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &m)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(validateSpaceModel(m)...)
+}
+
+// validateSpaceModel rejects attributes that are incoherent on spaces.
+// Pure function to keep the logic unit-testable without framework plumbing.
+func validateSpaceModel(m roomLikeModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if m.Encryption.ValueBool() {
+		diags.AddAttributeError(path.Root("encryption_enabled"),
+			"encryption_enabled not valid on matrix_space",
+			"Encrypted spaces are not coherently supported by clients. Encrypt individual rooms under the space instead.")
+	}
+	if m.IsDirect.ValueBool() {
+		diags.AddAttributeError(path.Root("is_direct"),
+			"is_direct not valid on matrix_space",
+			"Spaces cannot be direct chats. Drop this attribute or move it onto a matrix_room.")
+	}
+	return diags
 }

@@ -19,6 +19,8 @@ Resources:
 | `matrix_space_child` | Link a room or space under a parent space |
 | `matrix_room_member` | Manage one user's membership (idempotent invite/kick/ban/leave/knock) |
 | `matrix_room_power_levels` | Full `m.room.power_levels` control — works on rooms and spaces |
+| `matrix_room_join_rules` | `m.room.join_rules` — public/invite/knock/restricted, with space-gated `restricted` support |
+| `matrix_room_server_acl` | `m.room.server_acl` — federation allow/deny lists |
 | `matrix_room_alias` | Directory alias management |
 | `matrix_room_state` | Arbitrary state-event escape hatch |
 
@@ -115,6 +117,8 @@ tofu import matrix_space.team '!xyzGHI:example.com'
 tofu import matrix_space_child.general '!xyzGHI:example.com|!abcDEF:example.com'
 tofu import matrix_room_member.alice '!abcDEF:example.com|@alice:example.com'
 tofu import matrix_room_power_levels.general '!abcDEF:example.com'
+tofu import matrix_room_join_rules.general '!abcDEF:example.com'
+tofu import matrix_room_server_acl.general '!abcDEF:example.com'
 tofu import matrix_room_alias.extra '#team-general:example.com'
 tofu import matrix_room_state.pins '!abcDEF:example.com|m.room.pinned_events'
 ```
@@ -148,3 +152,8 @@ containerized Synapse.
 - `matrix_space` creates rooms with Element's space power-level defaults
   (`events_default = 100`, `invite = 50`). Override via a
   `matrix_room_power_levels` resource pointing at the space.
+- `matrix_room_server_acl` can irreversibly lock the caller's homeserver out
+  of the room if misconfigured — once your server is blocked, you cannot send
+  a corrective ACL, and only a homeserver admin can recover. The provider
+  emits a plan-time warning when it detects a likely self-lockout, but
+  double-check `allow` / `deny` before applying.

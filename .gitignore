@@ -6,3 +6,4 @@ terraform-provider-matrix
 testbed/
 dist/
 coverage.out
+.claude/
