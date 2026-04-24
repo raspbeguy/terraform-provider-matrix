@@ -13,18 +13,19 @@ import (
 )
 
 type roomLikeModel struct {
-	ID             types.String `tfsdk:"id"`
-	Name           types.String `tfsdk:"name"`
-	Topic          types.String `tfsdk:"topic"`
-	AvatarURL      types.String `tfsdk:"avatar_url"`
-	Preset         types.String `tfsdk:"preset"`
-	Visibility     types.String `tfsdk:"visibility"`
-	RoomVersion    types.String `tfsdk:"room_version"`
-	RoomAliasName  types.String `tfsdk:"room_alias_name"`
-	Encryption     types.Bool   `tfsdk:"encryption_enabled"`
-	InitialInvites types.Set    `tfsdk:"initial_invites"`
-	IsDirect       types.Bool   `tfsdk:"is_direct"`
-	CanonicalAlias types.String `tfsdk:"canonical_alias"`
+	ID                types.String `tfsdk:"id"`
+	Name              types.String `tfsdk:"name"`
+	Topic             types.String `tfsdk:"topic"`
+	AvatarURL         types.String `tfsdk:"avatar_url"`
+	Preset            types.String `tfsdk:"preset"`
+	Visibility        types.String `tfsdk:"visibility"`
+	RoomVersion       types.String `tfsdk:"room_version"`
+	RoomAliasName     types.String `tfsdk:"room_alias_name"`
+	Encryption        types.Bool   `tfsdk:"encryption_enabled"`
+	InitialInvites    types.Set    `tfsdk:"initial_invites"`
+	IsDirect          types.Bool   `tfsdk:"is_direct"`
+	CanonicalAlias    types.String `tfsdk:"canonical_alias"`
+	HistoryVisibility types.String `tfsdk:"history_visibility"`
 }
 
 // createRoomLike creates either a normal room or a space depending on isSpace.
@@ -89,6 +90,16 @@ func createRoomLike(ctx context.Context, c *Client, m *roomLikeModel, isSpace bo
 		})
 	}
 
+	if s := m.HistoryVisibility.ValueString(); s != "" {
+		req.InitialState = append(req.InitialState, &event.Event{
+			Type:     event.StateHistoryVisibility,
+			StateKey: ptr(""),
+			Content: event.Content{
+				Parsed: &event.HistoryVisibilityEventContent{HistoryVisibility: event.HistoryVisibility(s)},
+			},
+		})
+	}
+
 	resp, err := c.MX.CreateRoom(ctx, req)
 	if err != nil {
 		diags.AddError("Failed to create room", err.Error())
@@ -126,6 +137,17 @@ func syncMutableStateFromModel(ctx context.Context, c *Client, roomID id.RoomID,
 		}
 		if err := sendState(ctx, c, roomID, event.StateRoomAvatar, "", content); err != nil {
 			diags.AddError("Failed to set room avatar", err.Error())
+		}
+	}
+	// History visibility. Skip when plan is null — the attribute is Optional+Computed,
+	// so null means "accept whatever the server has." Only push a change when the
+	// user explicitly declares a value that differs from state.
+	if !plan.HistoryVisibility.IsNull() && !plan.HistoryVisibility.Equal(prior.HistoryVisibility) {
+		content := &event.HistoryVisibilityEventContent{
+			HistoryVisibility: event.HistoryVisibility(plan.HistoryVisibility.ValueString()),
+		}
+		if err := sendState(ctx, c, roomID, event.StateHistoryVisibility, "", content); err != nil {
+			diags.AddError("Failed to set history_visibility", err.Error())
 		}
 	}
 }
@@ -183,6 +205,19 @@ func readRoomLikeState(ctx context.Context, c *Client, roomID id.RoomID, m *room
 		m.CanonicalAlias = types.StringValue(string(canon.Alias))
 	} else {
 		m.CanonicalAlias = types.StringNull()
+	}
+
+	// history visibility
+	var hv event.HistoryVisibilityEventContent
+	ok, err = getState(ctx, c, roomID, event.StateHistoryVisibility, "", &hv)
+	if err != nil {
+		diags.AddError("Failed to read history_visibility", err.Error())
+		return
+	}
+	if ok && hv.HistoryVisibility != "" {
+		m.HistoryVisibility = types.StringValue(string(hv.HistoryVisibility))
+	} else {
+		m.HistoryVisibility = types.StringNull()
 	}
 }
 

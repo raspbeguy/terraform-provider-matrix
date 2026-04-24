@@ -14,12 +14,13 @@ A Matrix room.
 
 ```terraform
 resource "matrix_room" "example" {
-  name            = "#general"
-  topic           = "Team chat"
-  preset          = "private_chat"
-  visibility      = "private"
-  room_alias_name = "team-general"
-  initial_invites = ["@alice:example.com", "@bob:example.com"]
+  name               = "#general"
+  topic              = "Team chat"
+  preset             = "private_chat"
+  visibility         = "private"
+  history_visibility = "shared"
+  room_alias_name    = "team-general"
+  initial_invites    = ["@alice:example.com", "@bob:example.com"]
 }
 ```
 
@@ -30,6 +31,7 @@ resource "matrix_room" "example" {
 
 - `avatar_url` (String) Avatar mxc:// URI (m.room.avatar).
 - `encryption_enabled` (Boolean) If true, enable end-to-end encryption at creation time. Cannot be disabled once set.
+- `history_visibility` (String) Controls who can read the timeline: joined | invited | shared | world_readable. If unset, reflects the homeserver's default. Updatable after creation.
 - `initial_invites` (Set of String) User IDs to invite during room creation. Subsequent changes are ignored — use matrix_room_member.
 - `is_direct` (Boolean) Mark the room as a direct chat.
 - `name` (String) Room name (m.room.name).
