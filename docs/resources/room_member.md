@@ -4,14 +4,14 @@ page_title: "matrix_room_member Resource - Matrix"
 subcategory: ""
 description: |-
   Manages one user's membership in a room from the caller's perspective.
-  This resource is declarative: as long as the HCL says membership = "invite", the provider keeps the room reconciled to that intent. If the user accepts the invite and later leaves the room, the next tofu apply will re-invite them, since "leave" no longer matches the declared "invite". To stop reconciling, either terraform state rm the resource (drops it from state, leaves the server alone) or add a lifecycle { ignore_changes = [membership] } block (initial invite still fires; subsequent leaves are ignored).
+  This resource is declarative: as long as the HCL says membership = "invite", the provider keeps the room reconciled to that intent. If the user accepts the invite and later leaves the room, the next terraform apply will re-invite them, since "leave" no longer matches the declared "invite". To stop reconciling, either terraform state rm the resource (drops it from state, leaves the server alone) or add a lifecycle { ignore_changes = [membership] } block (initial invite still fires; subsequent leaves are ignored).
 ---
 
 # matrix_room_member (Resource)
 
 Manages one user's membership in a room from the caller's perspective.
 
-This resource is declarative: as long as the HCL says `membership = "invite"`, the provider keeps the room reconciled to that intent. If the user accepts the invite and later leaves the room, the next `tofu apply` will re-invite them, since `"leave"` no longer matches the declared `"invite"`. To stop reconciling, either `terraform state rm` the resource (drops it from state, leaves the server alone) or add a `lifecycle { ignore_changes = [membership] }` block (initial invite still fires; subsequent leaves are ignored).
+This resource is declarative: as long as the HCL says `membership = "invite"`, the provider keeps the room reconciled to that intent. If the user accepts the invite and later leaves the room, the next `terraform apply` will re-invite them, since `"leave"` no longer matches the declared `"invite"`. To stop reconciling, either `terraform state rm` the resource (drops it from state, leaves the server alone) or add a `lifecycle { ignore_changes = [membership] }` block (initial invite still fires; subsequent leaves are ignored).
 
 ## Example Usage
 
@@ -48,5 +48,5 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 
 ```shell
 # Composite ID: <room_id>|<user_id>
-tofu import matrix_room_member.example '!abcDEF:example.com|@alice:example.com'
+terraform import matrix_room_member.example '!abcDEF:example.com|@alice:example.com'
 ```

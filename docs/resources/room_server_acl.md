@@ -53,5 +53,5 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 
 ```shell
 # Import by room (or space) ID.
-tofu import matrix_room_server_acl.example '!abcDEF:example.com'
+terraform import matrix_room_server_acl.example '!abcDEF:example.com'
 ```

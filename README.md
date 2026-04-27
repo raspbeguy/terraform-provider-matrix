@@ -108,19 +108,19 @@ make docs
 
 ## Importing existing rooms & spaces
 
-Every resource supports `tofu import` for adopting state you already have on
+Every resource supports `terraform import` for adopting state you already have on
 the homeserver without recreating it:
 
 ```bash
-tofu import matrix_room.example '!abcDEF:example.com'
-tofu import matrix_space.team '!xyzGHI:example.com'
-tofu import matrix_space_child.general '!xyzGHI:example.com|!abcDEF:example.com'
-tofu import matrix_room_member.alice '!abcDEF:example.com|@alice:example.com'
-tofu import matrix_room_power_levels.general '!abcDEF:example.com'
-tofu import matrix_room_join_rules.general '!abcDEF:example.com'
-tofu import matrix_room_server_acl.general '!abcDEF:example.com'
-tofu import matrix_room_alias.extra '#team-general:example.com'
-tofu import matrix_room_state.pins '!abcDEF:example.com|m.room.pinned_events'
+terraform import matrix_room.example '!abcDEF:example.com'
+terraform import matrix_space.team '!xyzGHI:example.com'
+terraform import matrix_space_child.general '!xyzGHI:example.com|!abcDEF:example.com'
+terraform import matrix_room_member.alice '!abcDEF:example.com|@alice:example.com'
+terraform import matrix_room_power_levels.general '!abcDEF:example.com'
+terraform import matrix_room_join_rules.general '!abcDEF:example.com'
+terraform import matrix_room_server_acl.general '!abcDEF:example.com'
+terraform import matrix_room_alias.extra '#team-general:example.com'
+terraform import matrix_room_state.pins '!abcDEF:example.com|m.room.pinned_events'
 ```
 
 See each resource's docs page for the exact ID format.
@@ -146,11 +146,11 @@ containerized Synapse.
   `matrix_room` or `matrix_space` just makes the bot leave; the room lingers.
 - `matrix_room_member.reason` is a transition parameter (only attached to the
   invite/kick/ban event), not reconciled state. It's sent when the membership
-  changes and not refreshed on `tofu refresh`.
+  changes and not refreshed on `terraform refresh`.
 - Membership transitions are idempotent: re-invoking `invite` on someone who's
   already `join` is a no-op (not a forbidden state event).
 - `matrix_room_member` is declarative: if a user accepts the invite and later
-  leaves the room, the next `tofu apply` will re-invite them, because the HCL
+  leaves the room, the next `terraform apply` will re-invite them, because the HCL
   still says `membership = "invite"`. To stop reconciling, either
   `terraform state rm` the resource (drops it from state, leaves the server
   alone) or add `lifecycle { ignore_changes = [membership] }` on the block
