@@ -47,7 +47,7 @@ func (r *roomMemberResource) Schema(_ context.Context, _ resource.SchemaRequest,
 	resp.Schema = schema.Schema{
 		Description: "Manages one user's membership in a room from the caller's perspective.\n\n" +
 			"This resource is declarative: as long as the HCL says `membership = \"invite\"`, the provider keeps the room reconciled to that intent. " +
-			"If the user accepts the invite and later leaves the room, the next `tofu apply` will re-invite them, since `\"leave\"` no longer matches the declared `\"invite\"`. " +
+			"If the user accepts the invite and later leaves the room, the next `terraform apply` will re-invite them, since `\"leave\"` no longer matches the declared `\"invite\"`. " +
 			"To stop reconciling, either `terraform state rm` the resource (drops it from state, leaves the server alone) or add a `lifecycle { ignore_changes = [membership] }` block (initial invite still fires; subsequent leaves are ignored).",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{

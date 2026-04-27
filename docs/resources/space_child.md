@@ -48,5 +48,5 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 
 ```shell
 # Composite ID: <parent_space_id>|<child_room_id>
-tofu import matrix_space_child.example '!parentSpace:example.com|!childRoom:example.com'
+terraform import matrix_space_child.example '!parentSpace:example.com|!childRoom:example.com'
 ```
