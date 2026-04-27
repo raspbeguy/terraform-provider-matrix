@@ -149,6 +149,12 @@ containerized Synapse.
   changes and not refreshed on `tofu refresh`.
 - Membership transitions are idempotent: re-invoking `invite` on someone who's
   already `join` is a no-op (not a forbidden state event).
+- `matrix_room_member` is declarative: if a user accepts the invite and later
+  leaves the room, the next `tofu apply` will re-invite them, because the HCL
+  still says `membership = "invite"`. To stop reconciling, either
+  `terraform state rm` the resource (drops it from state, leaves the server
+  alone) or add `lifecycle { ignore_changes = [membership] }` on the block
+  (initial invite still fires, subsequent leaves are ignored).
 - `matrix_space` creates rooms with Element's space power-level defaults
   (`events_default = 100`, `invite = 50`). Override via a
   `matrix_room_power_levels` resource pointing at the space.
