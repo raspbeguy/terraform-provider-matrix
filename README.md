@@ -28,14 +28,17 @@ Data sources: `matrix_whoami`, `matrix_room` (by alias), `matrix_user`.
 
 ## Install
 
-From a registry (once published):
+Available on both registries:
+
+- HashiCorp Terraform Registry: <https://registry.terraform.io/providers/raspbeguy/matrix>
+- OpenTofu Registry: <https://search.opentofu.org/provider/raspbeguy/matrix>
 
 ```hcl
 terraform {
   required_providers {
     matrix = {
       source  = "raspbeguy/matrix"
-      version = "~> 0.1"
+      version = "~> 0.2"
     }
   }
 }
