@@ -12,7 +12,8 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
-type roomLikeModel struct {
+// baseRoomModel holds the attributes shared by matrix_room and matrix_space.
+type baseRoomModel struct {
 	ID                types.String `tfsdk:"id"`
 	Name              types.String `tfsdk:"name"`
 	Topic             types.String `tfsdk:"topic"`
@@ -21,16 +22,31 @@ type roomLikeModel struct {
 	Visibility        types.String `tfsdk:"visibility"`
 	RoomVersion       types.String `tfsdk:"room_version"`
 	RoomAliasName     types.String `tfsdk:"room_alias_name"`
-	Encryption        types.Bool   `tfsdk:"encryption_enabled"`
 	InitialInvites    types.Set    `tfsdk:"initial_invites"`
-	IsDirect          types.Bool   `tfsdk:"is_direct"`
 	CanonicalAlias    types.String `tfsdk:"canonical_alias"`
 	HistoryVisibility types.String `tfsdk:"history_visibility"`
 }
 
+// roomModel is the tfsdk model for matrix_room. It adds room-only fields that
+// are nonsensical on a space (encryption, direct-chat marker).
+type roomModel struct {
+	baseRoomModel
+	Encryption types.Bool `tfsdk:"encryption_enabled"`
+	IsDirect   types.Bool `tfsdk:"is_direct"`
+}
+
+// spaceModel is the tfsdk model for matrix_space. It deliberately omits
+// encryption_enabled and is_direct so those attributes don't appear in the
+// space's schema or its generated docs.
+type spaceModel struct {
+	baseRoomModel
+}
+
 // createRoomLike creates either a normal room or a space depending on isSpace.
+// `encryption` and `isDirect` are room-only flags; they should be false when
+// creating a space (the space variant doesn't expose those attributes).
 // Returns the new room ID.
-func createRoomLike(ctx context.Context, c *Client, m *roomLikeModel, isSpace bool, diags *diag.Diagnostics) id.RoomID {
+func createRoomLike(ctx context.Context, c *Client, m *baseRoomModel, encryption, isDirect, isSpace bool, diags *diag.Diagnostics) id.RoomID {
 	req := &mautrix.ReqCreateRoom{
 		Name:          m.Name.ValueString(),
 		Topic:         m.Topic.ValueString(),
@@ -38,7 +54,7 @@ func createRoomLike(ctx context.Context, c *Client, m *roomLikeModel, isSpace bo
 		Visibility:    m.Visibility.ValueString(),
 		RoomVersion:   id.RoomVersion(m.RoomVersion.ValueString()),
 		RoomAliasName: m.RoomAliasName.ValueString(),
-		IsDirect:      m.IsDirect.ValueBool(),
+		IsDirect:      isDirect,
 	}
 
 	if isSpace {
@@ -80,7 +96,7 @@ func createRoomLike(ctx context.Context, c *Client, m *roomLikeModel, isSpace bo
 		})
 	}
 
-	if m.Encryption.ValueBool() {
+	if encryption {
 		req.InitialState = append(req.InitialState, &event.Event{
 			Type:     event.StateEncryption,
 			StateKey: ptr(""),
@@ -111,7 +127,7 @@ func createRoomLike(ctx context.Context, c *Client, m *roomLikeModel, isSpace bo
 // syncMutableStateFromModel sends the state events driven by the mutable attributes of
 // a room-like resource. Called on Create (after CreateRoom) for fields not covered by
 // ReqCreateRoom, and on Update whenever the plan differs from state.
-func syncMutableStateFromModel(ctx context.Context, c *Client, roomID id.RoomID, plan, prior *roomLikeModel, diags *diag.Diagnostics) {
+func syncMutableStateFromModel(ctx context.Context, c *Client, roomID id.RoomID, plan, prior *baseRoomModel, diags *diag.Diagnostics) {
 	// Name
 	if !plan.Name.Equal(prior.Name) {
 		if err := sendState(ctx, c, roomID, event.StateRoomName, "", &event.RoomNameEventContent{Name: plan.Name.ValueString()}); err != nil {
@@ -154,7 +170,7 @@ func syncMutableStateFromModel(ctx context.Context, c *Client, roomID id.RoomID,
 
 // readRoomLikeState populates the "live" attributes (name, topic, avatar, canonical alias)
 // from the homeserver's state into m. Fields are zeroed to null when the state event is absent.
-func readRoomLikeState(ctx context.Context, c *Client, roomID id.RoomID, m *roomLikeModel, diags *diag.Diagnostics) {
+func readRoomLikeState(ctx context.Context, c *Client, roomID id.RoomID, m *baseRoomModel, diags *diag.Diagnostics) {
 	// name
 	var name event.RoomNameEventContent
 	ok, err := getState(ctx, c, roomID, event.StateRoomName, "", &name)
