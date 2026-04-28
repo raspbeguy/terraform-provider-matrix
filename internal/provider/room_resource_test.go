@@ -1,46 +1,42 @@
 package provider
 
 import (
+	"context"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
 )
 
-func TestValidateSpaceModel_RejectsEncryption(t *testing.T) {
-	m := roomLikeModel{Encryption: types.BoolValue(true)}
-	diags := validateSpaceModel(m)
-	if !diags.HasError() {
-		t.Fatalf("expected error for encryption_enabled on space, got %v", diags)
+// TestRoomSchemaIncludesRoomOnlyAttrs guards that matrix_room exposes the
+// room-only attributes (encryption_enabled, is_direct).
+func TestRoomSchemaIncludesRoomOnlyAttrs(t *testing.T) {
+	r := &roomResource{isSpace: false}
+	resp := &resource.SchemaResponse{}
+	r.Schema(context.Background(), resource.SchemaRequest{}, resp)
+
+	for _, name := range []string{"encryption_enabled", "is_direct"} {
+		if _, ok := resp.Schema.Attributes[name]; !ok {
+			t.Errorf("matrix_room schema is missing %q", name)
+		}
 	}
 }
 
-func TestValidateSpaceModel_RejectsIsDirect(t *testing.T) {
-	m := roomLikeModel{IsDirect: types.BoolValue(true)}
-	diags := validateSpaceModel(m)
-	if !diags.HasError() {
-		t.Fatalf("expected error for is_direct on space, got %v", diags)
-	}
-}
+// TestSpaceSchemaOmitsRoomOnlyAttrs guards that matrix_space does NOT expose
+// encryption_enabled or is_direct, both of which are nonsensical on a space.
+func TestSpaceSchemaOmitsRoomOnlyAttrs(t *testing.T) {
+	r := &roomResource{isSpace: true}
+	resp := &resource.SchemaResponse{}
+	r.Schema(context.Background(), resource.SchemaRequest{}, resp)
 
-func TestValidateSpaceModel_AllowsNeitherEncryptionNorIsDirect(t *testing.T) {
-	m := roomLikeModel{
-		Name:  types.StringValue("my-space"),
-		Topic: types.StringValue("fine as a space"),
+	for _, name := range []string{"encryption_enabled", "is_direct"} {
+		if _, ok := resp.Schema.Attributes[name]; ok {
+			t.Errorf("matrix_space schema should not expose %q", name)
+		}
 	}
-	diags := validateSpaceModel(m)
-	if diags.HasError() {
-		t.Fatalf("unexpected error for valid space model: %v", diags)
-	}
-}
-
-func TestValidateSpaceModel_RejectsBothTogether(t *testing.T) {
-	m := roomLikeModel{
-		Encryption: types.BoolValue(true),
-		IsDirect:   types.BoolValue(true),
-	}
-	diags := validateSpaceModel(m)
-	// Expect two separate errors, not one.
-	if diags.ErrorsCount() != 2 {
-		t.Fatalf("expected 2 errors, got %d (%v)", diags.ErrorsCount(), diags)
+	// Sanity: the shared attributes are still present on the space variant.
+	for _, name := range []string{"name", "topic", "history_visibility", "preset"} {
+		if _, ok := resp.Schema.Attributes[name]; !ok {
+			t.Errorf("matrix_space schema is missing shared attribute %q", name)
+		}
 	}
 }
