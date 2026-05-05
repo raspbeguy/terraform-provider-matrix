@@ -23,6 +23,8 @@ Resources:
 | `matrix_room_server_acl` | `m.room.server_acl` — federation allow/deny lists |
 | `matrix_room_alias` | Directory alias management |
 | `matrix_room_state` | Arbitrary state-event escape hatch |
+| `matrix_user_profile` | Caller's global profile (display name + avatar) |
+| `matrix_user_profile_override` | Per-room profile override (different displayname/avatar in a specific room) |
 
 Data sources: `matrix_whoami`, `matrix_room` (by alias), `matrix_user`.
 
@@ -124,6 +126,8 @@ terraform import matrix_room_join_rules.general '!abcDEF:example.com'
 terraform import matrix_room_server_acl.general '!abcDEF:example.com'
 terraform import matrix_room_alias.extra '#team-general:example.com'
 terraform import matrix_room_state.pins '!abcDEF:example.com|m.room.pinned_events'
+terraform import matrix_user_profile.bot '@bot:example.com'
+terraform import matrix_user_profile_override.bot_in_oncall '!abcDEF:example.com|@bot:example.com'
 ```
 
 See each resource's docs page for the exact ID format.
@@ -166,3 +170,9 @@ containerized Synapse.
   a corrective ACL, and only a homeserver admin can recover. The provider
   emits a plan-time warning when it detects a likely self-lockout, but
   double-check `allow` / `deny` before applying.
+- When using both `matrix_user_profile` and `matrix_user_profile_override`,
+  add `depends_on = [matrix_user_profile.<name>]` to the override resource.
+  Most homeservers propagate global profile changes to every `m.room.member`
+  event, wiping per-room overrides if the global change is applied last; the
+  `depends_on` guarantees Terraform applies the override after the global
+  profile so it survives.

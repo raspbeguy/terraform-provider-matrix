@@ -132,6 +132,8 @@ func (p *matrixProvider) Resources(_ context.Context) []func() resource.Resource
 		NewRoomStateResource,
 		NewRoomJoinRulesResource,
 		NewRoomServerACLResource,
+		NewUserProfileResource,
+		NewUserProfileOverrideResource,
 	}
 }
 
