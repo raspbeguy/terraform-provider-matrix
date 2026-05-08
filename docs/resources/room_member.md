@@ -28,7 +28,7 @@ resource "matrix_room_member" "invite_bob" {
 
 ### Required
 
-- `membership` (String) Desired membership: invite | join | leave | ban | knock.
+- `membership` (String) Desired membership: invite | join | leave | ban | knock. Read as "at least": if you declare `invite` and the user later accepts (membership becomes `join`), no drift is reported because `join` semantically satisfies `invite`. Same for `leave` ⊆ `ban`, and `knock` ⊆ `invite`/`join`.
 - `room_id` (String)
 - `user_id` (String)
 
