@@ -6,6 +6,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -44,6 +46,12 @@ func (r *powerLevelsResource) Metadata(_ context.Context, req resource.MetadataR
 }
 
 func (r *powerLevelsResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+	// All knobs are Optional+Computed: if the user doesn't declare a field, the
+	// homeserver's spec default applies, the next refresh stores it, and
+	// UseStateForUnknown keeps subsequent plans from showing perpetual drift
+	// (HCL null vs server-default value). Same pattern as history_visibility.
+	intPM := []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}
+	mapPM := []planmodifier.Map{mapplanmodifier.UseStateForUnknown()}
 	resp.Schema = schema.Schema{
 		Description: "Manages the m.room.power_levels state event for a single room. Works on any room-like entity, including spaces — point `room_id` at a matrix_space.id to tune its permissions (e.g. to unlock messages in a space, set `events_default = 0`).",
 		Attributes: map[string]schema.Attribute{
@@ -55,16 +63,16 @@ func (r *powerLevelsResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Required: true, Description: "ID of the room or space to manage power levels for.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
-			"users_default":  schema.Int64Attribute{Optional: true, Description: "Default level for users not listed in `users`."},
-			"events_default": schema.Int64Attribute{Optional: true, Description: "Default level to send message events."},
-			"state_default":  schema.Int64Attribute{Optional: true, Description: "Default level to send state events."},
-			"ban":            schema.Int64Attribute{Optional: true},
-			"kick":           schema.Int64Attribute{Optional: true},
-			"invite":         schema.Int64Attribute{Optional: true},
-			"redact":         schema.Int64Attribute{Optional: true},
-			"users":          schema.MapAttribute{Optional: true, ElementType: types.Int64Type, Description: "Per-user overrides by mxid."},
-			"events":         schema.MapAttribute{Optional: true, ElementType: types.Int64Type, Description: "Per-event-type overrides."},
-			"notify_room":    schema.Int64Attribute{Optional: true, Description: "Power level required for @room notifications (notifications.room)."},
+			"users_default":  schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM, Description: "Default level for users not listed in `users`."},
+			"events_default": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM, Description: "Default level to send message events."},
+			"state_default":  schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM, Description: "Default level to send state events."},
+			"ban":            schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM},
+			"kick":           schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM},
+			"invite":         schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM},
+			"redact":         schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM},
+			"users":          schema.MapAttribute{Optional: true, Computed: true, ElementType: types.Int64Type, PlanModifiers: mapPM, Description: "Per-user overrides by mxid."},
+			"events":         schema.MapAttribute{Optional: true, Computed: true, ElementType: types.Int64Type, PlanModifiers: mapPM, Description: "Per-event-type overrides."},
+			"notify_room":    schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: intPM, Description: "Power level required for @room notifications (notifications.room)."},
 		},
 	}
 }
@@ -80,30 +88,34 @@ func (r *powerLevelsResource) Configure(_ context.Context, req resource.Configur
 
 func powerLevelsFromModel(ctx context.Context, m *powerLevelsModel) (*event.PowerLevelsEventContent, error) {
 	pl := &event.PowerLevelsEventContent{}
-	if !m.UsersDefault.IsNull() {
-		pl.UsersDefault = int(m.UsersDefault.ValueInt64())
+	// All Int64 fields are Optional+Computed: skip when null (user didn't
+	// declare; let server defaults apply) or unknown (Computed value not yet
+	// resolved during Create).
+	set := func(field types.Int64) (int, bool) {
+		if field.IsNull() || field.IsUnknown() {
+			return 0, false
+		}
+		return int(field.ValueInt64()), true
 	}
-	if !m.EventsDefault.IsNull() {
-		pl.EventsDefault = int(m.EventsDefault.ValueInt64())
+	if v, ok := set(m.UsersDefault); ok {
+		pl.UsersDefault = v
 	}
-	if !m.StateDefault.IsNull() {
-		v := int(m.StateDefault.ValueInt64())
+	if v, ok := set(m.EventsDefault); ok {
+		pl.EventsDefault = v
+	}
+	if v, ok := set(m.StateDefault); ok {
 		pl.StateDefaultPtr = &v
 	}
-	if !m.Ban.IsNull() {
-		v := int(m.Ban.ValueInt64())
+	if v, ok := set(m.Ban); ok {
 		pl.BanPtr = &v
 	}
-	if !m.Kick.IsNull() {
-		v := int(m.Kick.ValueInt64())
+	if v, ok := set(m.Kick); ok {
 		pl.KickPtr = &v
 	}
-	if !m.Invite.IsNull() {
-		v := int(m.Invite.ValueInt64())
+	if v, ok := set(m.Invite); ok {
 		pl.InvitePtr = &v
 	}
-	if !m.Redact.IsNull() {
-		v := int(m.Redact.ValueInt64())
+	if v, ok := set(m.Redact); ok {
 		pl.RedactPtr = &v
 	}
 	if !m.Users.IsNull() && !m.Users.IsUnknown() {
@@ -126,8 +138,7 @@ func powerLevelsFromModel(ctx context.Context, m *powerLevelsModel) (*event.Powe
 			pl.Events[k] = int(v)
 		}
 	}
-	if !m.NotifyRoom.IsNull() {
-		v := int(m.NotifyRoom.ValueInt64())
+	if v, ok := set(m.NotifyRoom); ok {
 		pl.Notifications = &event.NotificationPowerLevels{RoomPtr: &v}
 	}
 	return pl, nil
