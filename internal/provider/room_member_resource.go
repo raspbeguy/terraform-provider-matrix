@@ -59,10 +59,11 @@ func (r *roomMemberResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			"user_id": schema.StringAttribute{Required: true, PlanModifiers: forceNew},
 			"membership": schema.StringAttribute{
 				Required:    true,
-				Description: "Desired membership: invite | join | leave | ban | knock.",
+				Description: "Desired membership: invite | join | leave | ban | knock. Read as \"at least\": if you declare `invite` and the user later accepts (membership becomes `join`), no drift is reported because `join` semantically satisfies `invite`. Same for `leave` ⊆ `ban`, and `knock` ⊆ `invite`/`join`.",
 				Validators: []validator.String{
 					oneOfString{"invite", "join", "leave", "ban", "knock"},
 				},
+				PlanModifiers: []planmodifier.String{membershipSatisfiedByModifier{}},
 			},
 			"reason": schema.StringAttribute{Optional: true, Description: "Optional reason sent with the state change."},
 		},
@@ -78,6 +79,28 @@ func (r *roomMemberResource) Configure(_ context.Context, req resource.Configure
 	r.client = c
 }
 
+// membershipSatisfiedBy reports whether the current membership semantically
+// satisfies the desired one — i.e. whether applyMembership would be a no-op
+// if called with `wanted` and the server already has `current`.
+//
+// The same table drives both the apply-time idempotency check and the
+// plan-time drift suppression, so the two stay consistent.
+func membershipSatisfiedBy(wanted, current string) bool {
+	switch wanted {
+	case "invite":
+		return current == "invite" || current == "join"
+	case "knock":
+		return current == "knock" || current == "invite" || current == "join"
+	case "leave":
+		return current == "leave" || current == "ban"
+	case "ban":
+		return current == "ban"
+	case "join":
+		return current == "join"
+	}
+	return false
+}
+
 func applyMembership(ctx context.Context, c *Client, roomID id.RoomID, userID id.UserID, target, reason string) error {
 	// Read current membership so the operation is idempotent and we don't fight
 	// transitions that already happened (e.g. user accepted an invite).
@@ -85,18 +108,15 @@ func applyMembership(ctx context.Context, c *Client, roomID id.RoomID, userID id
 	_, _ = getState(ctx, c, roomID, event.StateMember, string(userID), &current)
 	cur := string(current.Membership)
 
+	if membershipSatisfiedBy(target, cur) {
+		return nil
+	}
+
 	switch target {
 	case "invite":
-		// invite is satisfied by current ∈ {invite, join}.
-		if cur == "invite" || cur == "join" {
-			return nil
-		}
 		_, err := c.MX.InviteUser(ctx, roomID, &mautrix.ReqInviteUser{UserID: userID, Reason: reason})
 		return err
 	case "leave":
-		if cur == "leave" || cur == "ban" {
-			return nil
-		}
 		if userID == c.MX.UserID {
 			_, err := c.MX.LeaveRoom(ctx, roomID, &mautrix.ReqLeave{Reason: reason})
 			return err
@@ -104,26 +124,18 @@ func applyMembership(ctx context.Context, c *Client, roomID id.RoomID, userID id
 		_, err := c.MX.KickUser(ctx, roomID, &mautrix.ReqKickUser{UserID: userID, Reason: reason})
 		return err
 	case "ban":
-		if cur == "ban" {
-			return nil
-		}
 		_, err := c.MX.BanUser(ctx, roomID, &mautrix.ReqBanUser{UserID: userID, Reason: reason})
 		return err
 	case "join":
-		// Only the target user can join themselves. If they're already joined, that's fine.
-		// Otherwise we can't force it — surface a clear error.
-		if cur == "join" {
-			return nil
-		}
+		// Only the target user can join themselves. The "already joined" case is
+		// handled by the satisfaction check above; this branch fires when the
+		// caller is asking us to join someone else, which we can't do.
 		if userID == c.MX.UserID {
 			_, err := c.MX.JoinRoomByID(ctx, roomID)
 			return err
 		}
 		return fmt.Errorf("cannot force %s to join: membership=join can only be set by the target user (current membership=%q)", userID, cur)
 	case "knock":
-		if cur == "knock" || cur == "invite" || cur == "join" {
-			return nil
-		}
 		content := map[string]any{"membership": "knock"}
 		if reason != "" {
 			content["reason"] = reason
