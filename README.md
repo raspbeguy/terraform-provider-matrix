@@ -8,6 +8,10 @@ account. Built on
 [`terraform-plugin-framework`](https://github.com/hashicorp/terraform-plugin-framework)
 and [`mautrix-go`](https://github.com/mautrix/go).
 
+**Community room:** [#terraform-provider-matrix](https://matrix.to/#/!qjThJeWXXNnzmAhSIg:gugod.fr)
+on Matrix — discussion, questions, bug reports. The room itself is managed by
+this provider (power levels, members, aliases, etc., all declared in HCL).
+
 ## Features
 
 Resources:
