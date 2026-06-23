@@ -1,0 +1,51 @@
+name: notify
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Matrix notification
+        env:
+          MATRIX_HOMESERVER: ${{ secrets.MATRIX_HOMESERVER }}
+          MATRIX_ROOM_ID: ${{ secrets.MATRIX_ROOM_ID }}
+          MATRIX_TOKEN: ${{ secrets.MATRIX_TOKEN }}
+        run: |
+          case "${{ github.event_name }}" in
+            issues)
+              kind="Issue"
+              title="${{ github.event.issue.title }}"
+              url="${{ github.event.issue.html_url }}"
+              author="${{ github.event.issue.user.login }}"
+              ;;
+            pull_request)
+              kind="PR"
+              title="${{ github.event.pull_request.title }}"
+              url="${{ github.event.pull_request.html_url }}"
+              author="${{ github.event.pull_request.user.login }}"
+              ;;
+          esac
+
+          repo="${{ github.repository }}"
+          body=$(printf 'New %s in %s by %s: %s\n%s' "$kind" "$repo" "$author" "$title" "$url")
+          html=$(printf 'New %s in <b>%s</b> by %s: <a href="%s">%s</a>' "$kind" "$repo" "$author" "$url" "$title")
+
+          payload=$(jq -n \
+            --arg body "$body" \
+            --arg html "$html" \
+            '{msgtype:"m.text", body:$body, format:"org.matrix.custom.html", formatted_body:$html}')
+
+          txn="${{ github.run_id }}-${{ github.run_attempt }}"
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer $MATRIX_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            "$MATRIX_HOMESERVER/_matrix/client/v3/rooms/$MATRIX_ROOM_ID/send/m.room.message/$txn"

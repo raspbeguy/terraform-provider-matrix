@@ -32,3 +32,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+
+  notify:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    continue-on-error: true  # a Matrix outage must not fail the release
+    steps:
+      - name: Send Matrix notification
+        env:
+          MATRIX_HOMESERVER: ${{ secrets.MATRIX_HOMESERVER }}
+          MATRIX_ROOM_ID: ${{ secrets.MATRIX_ROOM_ID }}
+          MATRIX_TOKEN: ${{ secrets.MATRIX_TOKEN }}
+        run: |
+          repo="${{ github.repository }}"
+          tag="${{ github.ref_name }}"
+          url="${{ github.server_url }}/$repo/releases/tag/$tag"
+
+          body=$(printf 'New release of %s: %s\n%s' "$repo" "$tag" "$url")
+          html=$(printf 'New release of <b>%s</b>: <a href="%s">%s</a>' "$repo" "$url" "$tag")
+
+          payload=$(jq -n \
+            --arg body "$body" \
+            --arg html "$html" \
+            '{msgtype:"m.text", body:$body, format:"org.matrix.custom.html", formatted_body:$html}')
+
+          txn="${{ github.run_id }}-${{ github.run_attempt }}"
+          curl -fsS -X PUT \
+            -H "Authorization: Bearer $MATRIX_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            "$MATRIX_HOMESERVER/_matrix/client/v3/rooms/$MATRIX_ROOM_ID/send/m.room.message/$txn"
