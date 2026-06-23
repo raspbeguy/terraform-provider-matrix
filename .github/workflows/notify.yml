@@ -12,6 +12,7 @@ permissions:
 jobs:
   notify:
     runs-on: ubuntu-latest
+    continue-on-error: true  # a Matrix outage must not show up as a failed run
     steps:
       - name: Send Matrix notification
         env:
