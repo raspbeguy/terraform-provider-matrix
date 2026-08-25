@@ -16,7 +16,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -472,4 +476,130 @@ func TestAccRoom_ImportDoesNotReplace(t *testing.T) {
 
 func TestAccSpace_ImportDoesNotReplace(t *testing.T) {
 	importDoesNotReplace(t, "space", "tf-acc-import-space")
+}
+
+// attrForcesReplace runs an attribute's plan modifiers over a known-to-known
+// change and reports whether any of them demands a replacement.
+func attrForcesReplace(t *testing.T, s schema.Schema, name, from, to string) bool {
+	t.Helper()
+	sa, ok := s.Attributes[name].(schema.StringAttribute)
+	if !ok {
+		t.Fatalf("%s is not a StringAttribute", name)
+	}
+	req := planmodifier.StringRequest{
+		State:      tfsdk.State{Raw: tftypes.NewValue(tftypes.String, "x")},
+		Plan:       tfsdk.Plan{Raw: tftypes.NewValue(tftypes.String, "y")},
+		StateValue: types.StringValue(from),
+		PlanValue:  types.StringValue(to),
+	}
+	for _, mod := range sa.PlanModifiers {
+		resp := &planmodifier.StringResponse{PlanValue: req.PlanValue}
+		mod.PlanModifyString(context.Background(), req, resp)
+		if resp.RequiresReplace {
+			return true
+		}
+	}
+	return false
+}
+
+// TestVisibilityIsUpdatableNotCreateOnly guards the distinction issue #41 is
+// about. visibility is reconciled through the room directory, so it must never
+// force a replacement and must not be treated as create-only. preset is the
+// control: it has no endpoint at all, so a change to it still replaces the room.
+func TestVisibilityIsUpdatableNotCreateOnly(t *testing.T) {
+	for _, isSpace := range []bool{false, true} {
+		name := "room"
+		if isSpace {
+			name = "space"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := roomSchema(t, isSpace)
+			if attrForcesReplace(t, s, "visibility", "private", "public") {
+				t.Error("visibility must not force a replacement: the provider reconciles it through the directory (issue #41)")
+			}
+			if !attrForcesReplace(t, s, "preset", "private_chat", "public_chat") {
+				t.Error("preset must still force a replacement when it changes from a known value")
+			}
+		})
+	}
+}
+
+// testAccSetRoomVisibility changes a room's directory listing behind Terraform's
+// back, so a test can prove the refresh notices.
+func testAccSetRoomVisibility(t *testing.T, resourceName, visibility string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[resourceName]
+		if !ok {
+			return fmt.Errorf("resource %s not found in state", resourceName)
+		}
+		if err := setRoomVisibility(context.Background(), testAccClient(t), id.RoomID(rs.Primary.ID), visibility); err != nil {
+			return fmt.Errorf("set directory visibility: %w", err)
+		}
+		return nil
+	}
+}
+
+func testAccRoomVisibilityConfig(alias string) string {
+	return fmt.Sprintf(`
+terraform {
+  required_providers {
+    matrix = { source = "raspbeguy/matrix" }
+  }
+}
+
+provider "matrix" {}
+
+resource "matrix_room" "test" {
+  name            = "tf-acc-visibility"
+  preset          = "public_chat"
+  visibility      = "public"
+  room_version    = "11"
+  room_alias_name = %[1]q
+}
+`, alias)
+}
+
+// TestAccRoom_VisibilityDriftIsDetected is the regression test for issue #41.
+// visibility sat in the create-only read path, so once state held a value no
+// refresh ever read the directory again. A homeserver that refused to publish
+// left state claiming public forever, and a change made in a client was
+// invisible for any room.
+//
+// The assertions are deliberate. ExpectNonEmptyPlan alone would prove nothing:
+// a refresh step only fails on an unexpected non-empty plan, so the flag permits
+// a non-empty plan without requiring one, and this test would pass either way.
+// The Check asserts the refreshed state really holds the homeserver's value, and
+// the plan check requires the drift to surface as an update.
+func TestAccRoom_VisibilityDriftIsDetected(t *testing.T) {
+	testAccSkipUnlessAcc(t)
+	const name = "matrix_room.test"
+	config := testAccRoomVisibilityConfig("tf-acc-visibility-drift")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("visibility"), knownvalue.StringExact("public")),
+				},
+			},
+			{
+				// Unpublish behind Terraform's back.
+				Config: config,
+				Check:  testAccSetRoomVisibility(t, name, "private"),
+			},
+			{
+				RefreshState:       true,
+				ExpectNonEmptyPlan: true,
+				Check:              resource.TestCheckResourceAttr(name, "visibility", "private"),
+				RefreshPlanChecks: resource.RefreshPlanChecks{
+					PostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(name, plancheck.ResourceActionUpdate),
+					},
+				},
+			},
+		},
+	})
 }

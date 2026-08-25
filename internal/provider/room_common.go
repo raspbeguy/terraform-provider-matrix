@@ -132,7 +132,9 @@ func createRoomLike(ctx context.Context, c *Client, m *baseRoomModel, encryption
 		if got, found, err := getRoomVisibility(ctx, c, resp.RoomID); err == nil && found && got != want {
 			diags.AddWarning("Directory visibility not honoured",
 				"The homeserver reports "+string(resp.RoomID)+" as "+got+", not the requested "+want+
-					". Its room_list_publication_rules may forbid publishing this room.")
+					". Its room_list_publication_rules may forbid publishing this room."+
+					" Every later plan will show this difference, because a refresh reads the directory."+
+					visibilityCure)
 		}
 	}
 	return resp.RoomID
@@ -179,11 +181,15 @@ func syncMutableStateFromModel(ctx context.Context, c *Client, roomID id.RoomID,
 		if err := setRoomVisibility(ctx, c, roomID, want); err != nil {
 			diags.AddWarning("Failed to set directory visibility",
 				"The homeserver refused to set the directory visibility of "+string(roomID)+" to "+want+
-					": "+err.Error()+". Its room_list_publication_rules may forbid it.")
+					": "+err.Error()+". Its room_list_publication_rules may forbid it."+
+					" Every later plan will show this difference, because a refresh reads the directory."+
+					visibilityCure)
 		} else if got, found, err := getRoomVisibility(ctx, c, roomID); err == nil && found && got != want {
 			diags.AddWarning("Directory visibility not honoured",
 				"The homeserver reports "+string(roomID)+" as "+got+" after it was set to "+want+
-					". Its room_list_publication_rules may forbid it.")
+					". Its room_list_publication_rules may forbid it."+
+					" Every later plan will show this difference, because a refresh reads the directory."+
+					visibilityCure)
 		}
 	}
 	// History visibility. Skip when plan is null — the attribute is Optional+Computed,
@@ -274,10 +280,15 @@ func readRoomLikeState(ctx context.Context, c *Client, roomID id.RoomID, m *base
 // room does not report back the same way. Without it, an imported room leaves
 // them null and the first plan reads a configured value as a change. See #32.
 //
-// One rule throughout: touch an attribute only when the model has no value of
-// its own, meaning null after an import or unknown during Create. Anything the
-// model already decided is left alone, because the provider cannot change these
-// after creation and refreshing them would fight a value it can never reconcile.
+// One rule for almost all of it: touch an attribute only when the model has no
+// value of its own, meaning null after an import or unknown during Create.
+// Anything the model already decided is left alone, because the provider cannot
+// change these after creation and refreshing them would fight a value it can
+// never reconcile.
+//
+// visibility is the exception, and is here only so that Create leaves it known.
+// It is updatable, so a refresh must see the homeserver's value: that is
+// refreshRoomVisibility, on the Read path. See issue #41.
 //
 // An unknown must always come out known, or Terraform rejects the apply. So
 // every branch below ends by assigning something, null included, and a failed
@@ -324,6 +335,29 @@ func readCreateOnlyState(ctx context.Context, c *Client, roomID id.RoomID, m *ba
 	}
 	if m.InitialInvites.IsUnknown() {
 		m.InitialInvites = types.SetNull(types.StringType)
+	}
+}
+
+// visibilityCure is appended to every directory warning. Without it a
+// practitioner is told what went wrong and not what to do about the diff that
+// now follows every plan.
+const visibilityCure = " Remove `visibility` from the configuration to accept whatever the homeserver decides, and plans go clean again."
+
+// refreshRoomVisibility re-reads the public room directory into m, whatever the
+// model already holds.
+//
+// Read path only. readRoomLikeState runs on Create and Update too, and there the
+// model carries the configured value; overwriting it with the homeserver's would
+// make the applied value differ from a known config value, which Terraform
+// rejects. On a refresh there is no configuration to contradict, so the
+// homeserver wins. That is what makes a refused publication visible, instead of
+// state claiming a value the homeserver never accepted. See issue #41.
+//
+// Best effort: a failed read leaves the prior value rather than breaking the
+// refresh of every room in the workspace.
+func refreshRoomVisibility(ctx context.Context, c *Client, roomID id.RoomID, m *baseRoomModel) {
+	if vis, found, err := getRoomVisibility(ctx, c, roomID); err == nil && found && vis != "" {
+		m.Visibility = types.StringValue(vis)
 	}
 }
 
