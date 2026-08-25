@@ -1,8 +1,14 @@
 name: acceptance
 
 on:
+  # On pull requests too. The suite costs about 90 seconds and it has caught
+  # defects that every other gate missed, each of which reached main and had to
+  # be fixed forward. It needs no secrets, so it works on forks.
+  pull_request:
+    branches: [main]
   schedule:
     # 03:17 UTC nightly — offset from the hour to dodge GitHub's cron spikes.
+    # Still worth it: the Synapse image is unpinned and moves under us.
     - cron: '17 3 * * *'
   workflow_dispatch: {}
   push:
@@ -30,6 +36,16 @@ jobs:
 
       - name: Start Synapse
         run: docker compose -f ci/compose.synapse.yml up -d
+
+      # A stock Synapse denies room directory publication, so a room created
+      # with visibility = "public" is not published. That is the default the
+      # provider warns about, and the drift test needs a homeserver that allows
+      # it, so relax the rule here rather than assert the default.
+      - name: Allow room directory publication
+        run: |
+          docker compose -f ci/compose.synapse.yml exec -T synapse sh -c \
+            'printf "\nroom_list_publication_rules:\n  - user_id: \"*\"\n    alias: \"*\"\n    room_id: \"*\"\n    action: allow\n" >> /data/homeserver.yaml'
+          docker compose -f ci/compose.synapse.yml restart synapse
 
       - name: Wait for Synapse
         run: |
