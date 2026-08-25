@@ -162,9 +162,8 @@ func (r *spaceChildResource) Delete(ctx context.Context, req resource.DeleteRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := sendState(ctx, r.client, id.RoomID(state.ParentSpaceID.ValueString()), event.StateSpaceChild, state.ChildRoomID.ValueString(), map[string]any{}); err != nil {
-		resp.Diagnostics.AddError("Failed to remove m.space.child", err.Error())
-	}
+	err := sendState(ctx, r.client, id.RoomID(state.ParentSpaceID.ValueString()), event.StateSpaceChild, state.ChildRoomID.ValueString(), map[string]any{})
+	failedDestroy(&resp.Diagnostics, "Failed to remove m.space.child", err)
 }
 
 func (r *spaceChildResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

@@ -32,6 +32,10 @@ func TestMembershipSatisfiedBy(t *testing.T) {
 		{"knock", "ban", false},
 
 		// leave is satisfied by leave or ban (banned is "more left than left").
+		//
+		// Destroy relies on this. applyMembership returns nil for both, so the
+		// already-gone case never reaches an error, which is why Delete can treat
+		// every error as a real refusal rather than swallowing it. See issue #45.
 		{"leave", "leave", true},
 		{"leave", "ban", true},
 		{"leave", "invite", false},

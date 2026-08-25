@@ -405,9 +405,9 @@ func adoptedAliasLocalpart(alias id.RoomAlias, homeserver string) string {
 // null after an import, or unknown while Create resolves a Computed attribute.
 func unset(v attr.Value) bool { return v.IsNull() || v.IsUnknown() }
 
-// leaveRoomBestEffort is used on resource Delete: we can't delete a room server-side,
+// leaveRoom is used on resource Delete: we can't delete a room server-side,
 // but we can leave it so it disappears from the caller's view.
-func leaveRoomBestEffort(ctx context.Context, c *Client, roomID id.RoomID) error {
+func leaveRoom(ctx context.Context, c *Client, roomID id.RoomID) error {
 	_, err := c.MX.LeaveRoom(ctx, roomID)
 	return err
 }
