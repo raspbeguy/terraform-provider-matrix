@@ -2,12 +2,18 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-framework/resource"
+	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -403,8 +409,8 @@ func TestPowerLevelsSelfLockoutWarnings(t *testing.T) {
 // shows it as "known after apply".
 func TestPowerLevelsSchemaKnobsAreOptionalComputed(t *testing.T) {
 	r := &powerLevelsResource{}
-	resp := &resource.SchemaResponse{}
-	r.Schema(context.Background(), resource.SchemaRequest{}, resp)
+	resp := &fwresource.SchemaResponse{}
+	r.Schema(context.Background(), fwresource.SchemaRequest{}, resp)
 
 	for _, name := range powerLevelsKnobs {
 		attr, ok := resp.Schema.Attributes[name]
@@ -428,4 +434,148 @@ func TestPowerLevelsSchemaKnobsAreOptionalComputed(t *testing.T) {
 			t.Errorf("%q: unexpected attribute type %T", name, attr)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance tests. These need TF_ACC and a live homeserver; resource.Test
+// skips itself otherwise, so `go test ./...` on a PR is unaffected.
+// ---------------------------------------------------------------------------
+
+func testAccPowerLevelsConfig(kind, eventsDefault string) string {
+	// users is deliberately NOT declared here. A declared users map replaces the
+	// map wholesale even after the fix, so it would still demote the caller —
+	// that case is covered by TestPowerLevelsSelfLockoutWarnings, not here.
+	return fmt.Sprintf(`
+terraform {
+  required_providers {
+    matrix = { source = "raspbeguy/matrix" }
+  }
+}
+
+provider "matrix" {}
+
+resource "matrix_%[1]s" "test" {
+  name   = "tf-acc-power-levels"
+  topic  = "Managed by the acceptance suite"
+  preset = "private_chat"
+
+  # Pinned on purpose. From room version 12 the creator's power comes from
+  # m.room.create and the creator is absent from the users map, so the users
+  # assertions below would not hold. Issue #29 is about rooms whose creator
+  # sits in that map, which is version 11 and earlier.
+  room_version = "11"
+}
+
+resource "matrix_room_power_levels" "test" {
+  room_id        = matrix_%[1]s.test.id
+  events_default = %[2]s
+}
+`, kind, eventsDefault)
+}
+
+// testAccCheckServerUserLevel asserts on the homeserver, not on Terraform
+// state. State can be right while the event on the server is wrong.
+//
+// It reads pl.Users directly rather than calling GetUserLevel. A content
+// fetched through getState carries no CreateEvent, so mautrix cannot detect
+// creator power and GetUserLevel would report users_default for an account
+// that actually holds infinite power. The configs pin room version 11, where
+// the creator is an ordinary entry in the map.
+func testAccCheckServerUserLevel(t *testing.T, roomResourceName, userID string, want int) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[roomResourceName]
+		if !ok {
+			return fmt.Errorf("resource %s not found in state", roomResourceName)
+		}
+		pl, found, err := fetchPowerLevels(context.Background(), testAccClient(t), id.RoomID(rs.Primary.ID))
+		if err != nil {
+			return fmt.Errorf("read power levels: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("room %s has no m.room.power_levels", rs.Primary.ID)
+		}
+		got, listed := pl.Users[id.UserID(userID)]
+		if !listed {
+			return fmt.Errorf("server-side users map has no entry for %s, it holds %v (issue #29)", userID, pl.Users)
+		}
+		if got != want {
+			return fmt.Errorf("server-side level for %s: got %d, want %d (issue #29)", userID, got, want)
+		}
+		return nil
+	}
+}
+
+// TestAccRoomPowerLevels_PartialConfig reproduces both defects of issue #29.
+//
+// Defect 1: a create whose config omits Optional+Computed attributes wrote
+// unknown values to state and failed with "Provider returned invalid result
+// object after apply". Step 1 completing at all is the assertion.
+//
+// Defect 2: that same create replaced the whole m.room.power_levels event,
+// dropping the creating account from its users entry of 100 to users_default 0.
+// That is below state_default 50, so the room became unmanageable for good.
+func TestAccRoomPowerLevels_PartialConfig(t *testing.T) {
+	testAccSkipUnlessAcc(t)
+	caller := testAccUserID(t)
+	const name = "matrix_room_power_levels.test"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPowerLevelsConfig("room", "25"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("events_default"), knownvalue.Int64Exact(25)),
+					// Defect 1: these were unknown after apply.
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("state_default"), knownvalue.Int64Exact(50)),
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("users_default"), knownvalue.Int64Exact(0)),
+					// Defect 2: the account that created the room keeps level 100.
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("users").AtMapKey(caller), knownvalue.Int64Exact(100)),
+				},
+				Check: testAccCheckServerUserLevel(t, "matrix_room.test", caller, 100),
+			},
+			// The same config must plan clean after a refresh: no perpetual drift.
+			{Config: testAccPowerLevelsConfig("room", "25"), PlanOnly: true},
+			// An update must not clobber the untouched fields either. 0 also
+			// exercises the omitempty-drops-zero path end to end.
+			{
+				Config: testAccPowerLevelsConfig("room", "0"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("events_default"), knownvalue.Int64Exact(0)),
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("users").AtMapKey(caller), knownvalue.Int64Exact(100)),
+				},
+				Check: testAccCheckServerUserLevel(t, "matrix_room.test", caller, 100),
+			},
+			// id equals room_id, so the default import id needs no IdFunc.
+			{ResourceName: name, ImportState: true, ImportStateVerify: true},
+		},
+	})
+	// No CheckDestroy: Delete is a deliberate no-op, because power levels
+	// cannot be removed from a room.
+}
+
+// TestAccRoomPowerLevels_PreservesSpaceDefaults guards the interaction with
+// createRoomLike, which creates spaces with events_default 100 and invite 50.
+// A power levels resource that declared neither used to reset both to the spec
+// defaults, unlocking messages for everyone in the space.
+func TestAccRoomPowerLevels_PreservesSpaceDefaults(t *testing.T) {
+	testAccSkipUnlessAcc(t)
+	const name = "matrix_room_power_levels.test"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// Declares events_default only, so invite must survive untouched.
+				Config: testAccPowerLevelsConfig("space", "100"),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("events_default"), knownvalue.Int64Exact(100)),
+					statecheck.ExpectKnownValue(name, tfjsonpath.New("invite"), knownvalue.Int64Exact(50)),
+				},
+			},
+			{Config: testAccPowerLevelsConfig("space", "100"), PlanOnly: true},
+		},
+	})
 }
