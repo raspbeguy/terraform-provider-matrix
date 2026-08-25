@@ -72,3 +72,24 @@ func testAccUserID(t *testing.T) string {
 	}
 	return string(testAccClient(t).MX.UserID)
 }
+
+// TestMatrixHTTPRetries guards that the provider retries rate limits at all.
+// mautrix retries a 429 and honours Retry-After, but only when
+// DefaultHTTPRetries is above zero, and mautrix.NewClient leaves it at zero.
+// With it at zero a configuration that creates several rooms fails part way
+// through with M_LIMIT_EXCEEDED, which is how the acceptance suite found this.
+func TestMatrixHTTPRetries(t *testing.T) {
+	if matrixHTTPRetries <= 0 {
+		t.Fatalf("matrixHTTPRetries = %d; a homeserver rate limit must be retried", matrixHTTPRetries)
+	}
+	mcli, err := mautrix.NewClient("https://example.com", "@bot:example.com", "token")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if mcli.DefaultHTTPRetries != 0 {
+		t.Skip("mautrix now retries by default; the provider no longer needs to set it")
+	}
+	if mcli.IgnoreRateLimit {
+		t.Error("IgnoreRateLimit must stay false, or a 429 is never retried")
+	}
+}
