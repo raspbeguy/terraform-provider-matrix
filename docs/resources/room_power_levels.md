@@ -4,15 +4,26 @@ page_title: "matrix_room_power_levels Resource - Matrix"
 subcategory: ""
 description: |-
   Manages the m.room.power_levels state event for a single room. Works on any room-like entity, including spaces — point room_id at a matrix_space.id to tune its permissions (e.g. to unlock messages in a space, set events_default = 0).
+  Fields you do not declare keep the value the homeserver already has. The provider reads the current event, overlays the fields you declared, and writes the result back. A declared users or events map is the exception: it replaces that map completely, so that you can remove an entry.
+  Warning: self-lockout risk. A users map that omits the account the provider runs as drops that account to users_default. Below state_default, the account can no longer change the room's power levels, and terraform destroy does not undo it, because power levels cannot be deleted. Add (data.matrix_whoami.me.user_id) = 100 to users.
+  This applies to accounts whose power comes from users. In room version 12 and later, the account that created the room keeps its power whatever users says.
 ---
 
 # matrix_room_power_levels (Resource)
 
 Manages the m.room.power_levels state event for a single room. Works on any room-like entity, including spaces — point `room_id` at a matrix_space.id to tune its permissions (e.g. to unlock messages in a space, set `events_default = 0`).
 
+Fields you do not declare keep the value the homeserver already has. The provider reads the current event, overlays the fields you declared, and writes the result back. A declared `users` or `events` map is the exception: it replaces that map completely, so that you can remove an entry.
+
+**Warning: self-lockout risk.** A `users` map that omits the account the provider runs as drops that account to `users_default`. Below `state_default`, the account can no longer change the room's power levels, and `terraform destroy` does not undo it, because power levels cannot be deleted. Add `(data.matrix_whoami.me.user_id) = 100` to `users`.
+
+This applies to accounts whose power comes from `users`. In room version 12 and later, the account that created the room keeps its power whatever `users` says.
+
 ## Example Usage
 
 ```terraform
+data "matrix_whoami" "me" {}
+
 resource "matrix_room_power_levels" "example" {
   room_id        = matrix_room.example.id
   users_default  = 0
@@ -23,9 +34,13 @@ resource "matrix_room_power_levels" "example" {
   ban            = 100
   redact         = 50
 
+  # A declared users map replaces the whole map on the homeserver, so always
+  # list the account the provider runs as. Leave it out and that account drops
+  # to users_default, below state_default, and loses control of the room.
   users = {
-    "@alice:example.com" = 100
-    "@bob:example.com"   = 50
+    (data.matrix_whoami.me.user_id) = 100
+    "@alice:example.com"            = 100
+    "@bob:example.com"              = 50
   }
 
   events = {
@@ -34,6 +49,13 @@ resource "matrix_room_power_levels" "example" {
   }
 
   notify_room = 50
+}
+
+# Fields you leave out keep whatever the homeserver already has. This tunes one
+# field of a space and leaves its other power levels untouched.
+resource "matrix_room_power_levels" "unlock_space_messages" {
+  room_id        = matrix_space.example.id
+  events_default = 0
 }
 ```
 
@@ -46,16 +68,16 @@ resource "matrix_room_power_levels" "example" {
 
 ### Optional
 
-- `ban` (Number)
-- `events` (Map of Number) Per-event-type overrides.
-- `events_default` (Number) Default level to send message events.
-- `invite` (Number)
-- `kick` (Number)
+- `ban` (Number) Level required to ban a user. Matrix default: 50.
+- `events` (Map of Number) Per-event-type overrides. A declared map replaces the whole `events` map on the homeserver.
+- `events_default` (Number) Default level to send message events. Matrix default: 0.
+- `invite` (Number) Level required to invite a user. Matrix default: 0.
+- `kick` (Number) Level required to kick a user. Matrix default: 50.
 - `notify_room` (Number) Power level required for @room notifications (notifications.room).
-- `redact` (Number)
-- `state_default` (Number) Default level to send state events.
-- `users` (Map of Number) Per-user overrides by mxid.
-- `users_default` (Number) Default level for users not listed in `users`.
+- `redact` (Number) Level required to redact another user's event. Matrix default: 50.
+- `state_default` (Number) Default level to send state events. Matrix default: 50.
+- `users` (Map of Number) Per-user overrides by mxid. A declared map replaces the whole `users` map on the homeserver, so list the account the provider runs as, or it loses control of the room.
+- `users_default` (Number) Default level for users not listed in `users`. Matrix default: 0.
 
 ### Read-Only
 

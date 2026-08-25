@@ -168,7 +168,21 @@ containerized Synapse.
   (initial invite still fires, subsequent leaves are ignored).
 - `matrix_space` creates rooms with Element's space power-level defaults
   (`events_default = 100`, `invite = 50`). Override via a
-  `matrix_room_power_levels` resource pointing at the space.
+  `matrix_room_power_levels` resource pointing at the space. Fields that
+  resource does not declare keep the space defaults.
+- `matrix_room_power_levels` declares fields, not the whole event. Fields you
+  leave out keep whatever value the homeserver already has. A declared `users`
+  or `events` map is the exception: it replaces that map completely, so that
+  you can remove an entry.
+- `matrix_room_power_levels` can irreversibly lock the provider's own account
+  out of a room. A `users` map that omits that account drops it to
+  `users_default`; below `state_default` it can no longer change the room's
+  power levels, and `terraform destroy` does not undo it, because power levels
+  cannot be deleted. The provider emits a plan-time warning when it detects a
+  likely self-lockout. Add `(data.matrix_whoami.me.user_id) = 100` to `users`.
+  This applies to accounts whose power comes from `users`. In room version 12
+  and later, the account that created the room keeps its power whatever
+  `users` says.
 - `matrix_room_server_acl` can irreversibly lock the caller's homeserver out
   of the room if misconfigured — once your server is blocked, you cannot send
   a corrective ACL, and only a homeserver admin can recover. The provider
