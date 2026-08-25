@@ -28,6 +28,11 @@ type matrixProviderModel struct {
 	RequestTimeout types.String `tfsdk:"request_timeout"`
 }
 
+// matrixHTTPRetries is how many times a request is retried after a rate limit or
+// a gateway error. Each retry waits for the homeserver's Retry-After, so a
+// higher number costs wall time rather than requests.
+const matrixHTTPRetries = 4
+
 func New(version string) func() provider.Provider {
 	return func() provider.Provider {
 		return &matrixProvider{version: version}
@@ -100,6 +105,15 @@ func (p *matrixProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		return
 	}
 	mcli.Client.Timeout = timeout
+	// A homeserver rate-limits, and Synapse limits room creation tightly. mautrix
+	// retries a 429 and honours Retry-After, but only when this is above zero,
+	// and NewClient leaves it at zero. Without it a configuration that creates
+	// several rooms fails part way through with M_LIMIT_EXCEEDED, leaving some
+	// resources applied and some not.
+	//
+	// This also covers 502, 503 and 504, which a reverse proxy in front of a
+	// homeserver produces during a restart.
+	mcli.DefaultHTTPRetries = matrixHTTPRetries
 
 	// Fail-fast creds check and auto-discover user_id when not set.
 	who, err := mcli.Whoami(ctx)
