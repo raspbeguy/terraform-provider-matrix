@@ -586,9 +586,13 @@ func TestAccRoom_VisibilityDriftIsDetected(t *testing.T) {
 				},
 			},
 			{
-				// Unpublish behind Terraform's back.
-				Config: config,
-				Check:  testAccSetRoomVisibility(t, name, "private"),
+				// Unpublish behind Terraform's back. A step's Check runs before
+				// its own idempotency plan, so that plan now sees the drift;
+				// ExpectNonEmptyPlan tolerates it. The assertions live in the
+				// refresh step below.
+				Config:             config,
+				Check:              testAccSetRoomVisibility(t, name, "private"),
+				ExpectNonEmptyPlan: true,
 			},
 			{
 				RefreshState:       true,
