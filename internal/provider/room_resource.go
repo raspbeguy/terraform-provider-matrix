@@ -171,6 +171,9 @@ func (r *roomResource) Create(ctx context.Context, req resource.CreateRequest, r
 		}
 		plan.ID = types.StringValue(string(roomID))
 		readRoomLikeState(ctx, r.client, roomID, &plan.baseRoomModel, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		return
 	}
@@ -187,6 +190,12 @@ func (r *roomResource) Create(ctx context.Context, req resource.CreateRequest, r
 	plan.ID = types.StringValue(string(roomID))
 	readRoomLikeState(ctx, r.client, roomID, &plan.baseRoomModel, &resp.Diagnostics)
 	readRoomOnlyState(ctx, r.client, roomID, &plan)
+	if resp.Diagnostics.HasError() {
+		// readRoomLikeState returns at the first failure, which skips the pass
+		// that resolves the Computed attributes. Writing state now would report
+		// an unknown value on top of the real error.
+		return
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -234,6 +243,9 @@ func (r *roomResource) Update(ctx context.Context, req resource.UpdateRequest, r
 			return
 		}
 		readRoomLikeState(ctx, r.client, roomID, &plan.baseRoomModel, &resp.Diagnostics)
+		if resp.Diagnostics.HasError() {
+			return
+		}
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		return
 	}
@@ -251,6 +263,12 @@ func (r *roomResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 	readRoomLikeState(ctx, r.client, roomID, &plan.baseRoomModel, &resp.Diagnostics)
 	readRoomOnlyState(ctx, r.client, roomID, &plan)
+	if resp.Diagnostics.HasError() {
+		// readRoomLikeState returns at the first failure, which skips the pass
+		// that resolves the Computed attributes. Writing state now would report
+		// an unknown value on top of the real error.
+		return
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -293,6 +311,11 @@ func wrongResourceTypeDetail(roomID string, roomType event.RoomType, isSpace boo
 }
 
 func (r *roomResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	if r.client == nil {
+		resp.Diagnostics.AddError("Provider not configured",
+			"The Matrix client is not available. This is a bug in the provider.")
+		return
+	}
 	// A space is a room with creation_content.type = m.space, so a bare
 	// passthrough lets either resource adopt either kind and then fight it on
 	// every plan. Check before anything lands in state.

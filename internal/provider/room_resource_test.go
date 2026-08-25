@@ -196,23 +196,76 @@ func TestUnset(t *testing.T) {
 
 // TestRoomAliasLocalpart checks the split that adopts room_alias_name from a
 // room's canonical alias on import. id.RoomAlias has no Localpart method.
+//
+// The server part matters as much as the localpart: room_alias_name is a
+// localpart that /createRoom interprets on the caller's own homeserver, so an
+// alias hosted elsewhere is not a value this attribute could have produced.
 func TestRoomAliasLocalpart(t *testing.T) {
 	cases := []struct {
-		alias string
-		want  string
+		alias      string
+		want       string
+		wantServer string
 	}{
-		{"#general:example.com", "general"},
-		{"#with-dashes:example.com", "with-dashes"},
-		{"#room:sub.example.com:8448", "room"},
-		{"", ""},
+		{"#general:example.com", "general", "example.com"},
+		{"#with-dashes:example.com", "with-dashes", "example.com"},
+		{"#room:sub.example.com:8448", "room", "sub.example.com:8448"},
+		{"#elsewhere:other.example", "elsewhere", "other.example"},
+		{"", "", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.alias, func(t *testing.T) {
-			_, got, _ := id.ParseCommonIdentifier(id.RoomAlias(c.alias))
+			_, got, server := id.ParseCommonIdentifier(id.RoomAlias(c.alias))
 			if got != c.want {
 				t.Errorf("localpart of %q = %q, want %q", c.alias, got, c.want)
 			}
+			if server != c.wantServer {
+				t.Errorf("server of %q = %q, want %q", c.alias, server, c.wantServer)
+			}
 		})
+	}
+}
+
+// TestAdoptedAliasLocalpart guards which canonical aliases may be adopted into
+// room_alias_name on import. The attribute is a localpart that /createRoom
+// interprets on the caller's own homeserver, so an alias hosted elsewhere is
+// not a value it could have produced.
+func TestAdoptedAliasLocalpart(t *testing.T) {
+	const home = "example.com"
+	cases := []struct {
+		name       string
+		alias      string
+		homeserver string
+		want       string
+	}{
+		{name: "local alias", alias: "#general:example.com", homeserver: home, want: "general"},
+		{name: "dashes survive", alias: "#with-dashes:example.com", homeserver: home, want: "with-dashes"},
+		{name: "port is part of the server", alias: "#room:example.com:8448", homeserver: home, want: ""},
+		{name: "foreign alias is not adopted", alias: "#elsewhere:other.example", homeserver: home, want: ""},
+		{name: "no alias", alias: "", homeserver: home, want: ""},
+		{name: "unknown caller homeserver adopts nothing", alias: "#general:example.com", homeserver: "", want: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := adoptedAliasLocalpart(id.RoomAlias(c.alias), c.homeserver); got != c.want {
+				t.Errorf("adoptedAliasLocalpart(%q, %q) = %q, want %q", c.alias, c.homeserver, got, c.want)
+			}
+		})
+	}
+}
+
+// TestCallerHomeserver guards the comparison that keeps a foreign canonical
+// alias from being adopted into room_alias_name, and its nil safety.
+func TestCallerHomeserver(t *testing.T) {
+	if got := callerHomeserver(nil); got != "" {
+		t.Errorf("callerHomeserver(nil) = %q, want empty", got)
+	}
+	if got := homeserverFromMXID("@bot:example.com"); got != "example.com" {
+		t.Errorf("homeserverFromMXID = %q, want example.com", got)
+	}
+	// An empty caller must never match a real alias server, or a foreign alias
+	// would be adopted whenever the client is not configured.
+	if homeserverFromMXID("") == "other.example" {
+		t.Error("an unknown caller homeserver must not match a real one")
 	}
 }
 
