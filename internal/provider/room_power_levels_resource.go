@@ -388,7 +388,9 @@ func (r *powerLevelsResource) applyPowerLevels(ctx context.Context, m *powerLeve
 	// resource; failing here costs nothing.
 	typed, err := typedPowerLevels(merged)
 	if err != nil {
-		diags.AddError("Failed to map power_levels into state", err.Error())
+		// A distinct summary on purpose: nothing has been sent yet, so the room
+		// is untouched, and "failed to map into state" would suggest otherwise.
+		diags.AddError("Unsupported power levels content", err.Error())
 		return
 	}
 	if err := sendState(ctx, r.client, roomID, event.StatePowerLevels, "", merged); err != nil {
