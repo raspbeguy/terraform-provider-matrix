@@ -301,12 +301,8 @@ func readCreateOnlyState(ctx context.Context, c *Client, roomID id.RoomID, m *ba
 
 	if unset(m.RoomAliasName) {
 		alias := types.StringNull()
-		if canon.Alias != "" {
-			// id.RoomAlias has no Localpart method; this splitter strips the #
-			// sigil and everything from the first colon.
-			if _, localpart, _ := id.ParseCommonIdentifier(canon.Alias); localpart != "" {
-				alias = types.StringValue(localpart)
-			}
+		if localpart := adoptedAliasLocalpart(canon.Alias, callerHomeserver(c)); localpart != "" {
+			alias = types.StringValue(localpart)
 		}
 		m.RoomAliasName = alias
 	}
@@ -349,6 +345,26 @@ func readRoomOnlyState(ctx context.Context, c *Client, roomID id.RoomID, m *room
 	if m.IsDirect.IsUnknown() {
 		m.IsDirect = types.BoolNull()
 	}
+}
+
+// adoptedAliasLocalpart returns the localpart of a room's canonical alias, for
+// adopting into room_alias_name on import, or "" when it is not a value that
+// attribute could have produced.
+//
+// room_alias_name is a localpart that /createRoom interprets on the caller's own
+// homeserver, so an alias hosted anywhere else does not qualify. An unknown
+// caller homeserver disqualifies everything, rather than matching by accident.
+// id.RoomAlias has no Localpart method; this splitter strips the # sigil and
+// splits off the server part.
+func adoptedAliasLocalpart(alias id.RoomAlias, homeserver string) string {
+	if alias == "" || homeserver == "" {
+		return ""
+	}
+	_, localpart, server := id.ParseCommonIdentifier(alias)
+	if server != homeserver {
+		return ""
+	}
+	return localpart
 }
 
 // unset reports whether an attribute carries no value the model decided itself:
