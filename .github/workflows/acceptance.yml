@@ -22,6 +22,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # terraform-plugin-testing drives a real CLI binary. Without this it
+      # downloads Terraform from releases.hashicorp.com at test time.
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4  # v2
+        with:
+          tofu_wrapper: false
+
       - name: Start Synapse
         run: docker compose -f ci/compose.synapse.yml up -d
 
@@ -52,6 +58,12 @@ jobs:
           MATRIX_HOMESERVER_URL: http://localhost:8008
           MATRIX_ACCESS_TOKEN: ${{ steps.register.outputs.token }}
           MATRIX_USER_ID: "@tf:localhost"
+          TF_ACC_TERRAFORM_PATH: tofu
+          # The harness reattaches the in-process provider under this address,
+          # which has to match the source the test configs declare. Terraform
+          # users leave both unset and declare hashicorp/matrix instead.
+          TF_ACC_PROVIDER_HOST: registry.opentofu.org
+          TF_ACC_PROVIDER_NAMESPACE: raspbeguy
         run: go test -v -timeout 25m ./internal/provider/... -run '^TestAcc'
 
       - name: Synapse logs on failure

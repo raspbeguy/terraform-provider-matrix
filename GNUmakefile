@@ -3,6 +3,13 @@ NAME    ?= matrix
 VERSION ?= 0.1.0
 OS_ARCH ?= $(shell go env GOOS)_$(shell go env GOARCH)
 
+# The acceptance harness reattaches the in-process provider under this address,
+# which has to match the source the test configs declare, and it drives a real
+# CLI binary. Override all three to run the suite against Terraform instead.
+TF_ACC_PROVIDER_HOST      ?= registry.opentofu.org
+TF_ACC_PROVIDER_NAMESPACE ?= raspbeguy
+TF_ACC_TERRAFORM_PATH     ?= $(shell command -v tofu 2>/dev/null)
+
 BINARY  := terraform-provider-$(NAME)
 TF_INSTALL_DIR := $(HOME)/.terraform.d/plugins/registry.terraform.io/$(OWNER)/$(NAME)/$(VERSION)/$(OS_ARCH)
 TOFU_INSTALL_DIR := $(HOME)/.terraform.d/plugins/registry.opentofu.org/$(OWNER)/$(NAME)/$(VERSION)/$(OS_ARCH)
@@ -21,7 +28,11 @@ test:
 	go test -v ./...
 
 testacc:
-	TF_ACC=1 go test -v ./internal/provider/... -run TestAcc -timeout 30m
+	TF_ACC=1 \
+	TF_ACC_PROVIDER_HOST=$(TF_ACC_PROVIDER_HOST) \
+	TF_ACC_PROVIDER_NAMESPACE=$(TF_ACC_PROVIDER_NAMESPACE) \
+	TF_ACC_TERRAFORM_PATH=$(TF_ACC_TERRAFORM_PATH) \
+	go test -v ./internal/provider/... -run TestAcc -timeout 30m
 
 vet:
 	go vet ./...
