@@ -5,9 +5,10 @@ subcategory: ""
 description: |-
   Manages the m.room.power_levels state event for a single room. Works on any room-like entity, including spaces — point room_id at a matrix_space.id to tune its permissions (e.g. to unlock messages in a space, set events_default = 0).
   Fields you do not declare keep the value the homeserver already has. The provider reads the current event, overlays the fields you declared, and writes the result back. A declared users or events map is the exception: it replaces that map completely, so that you can remove an entry.
-  Warning: self-lockout risk. A users map that omits the account the provider runs as drops that account to users_default. Below state_default, the account can no longer change the room's power levels, and terraform destroy does not undo it, because power levels cannot be deleted. Add (data.matrix_whoami.me.user_id) = 100 to users.
+  Warning: self-lockout risk. A users map that omits the account the provider runs as drops that account to users_default. Below state_default, the account can no longer change the room's power levels, and terraform destroy does not undo it, because power levels cannot be deleted. Add (data.matrix_whoami.me.user_id) = 100 to users, unless that account created the room in a version 12 room: see below.
   Dropping users_default below state_default does the same thing whenever your account has no entry of its own in users. Raising state_default is not a risk on its own: the homeserver refuses any power value above the sender's own level, so that apply fails instead of locking you out.
-  This applies to accounts whose power comes from users. In room version 12 and later, the account that created the room keeps its power whatever users says.
+  This applies to accounts whose power comes from users. In room version 12 and later, the account that created the room keeps its power whatever users says, and must not appear in users at all: a homeserver rejects any m.room.power_levels event that lists a room creator. The provider reports that at plan time.
+  Keys this provider does not model, such as Synapse's historical, are preserved. A write merges into the room's current event rather than replacing it.
 ---
 
 # matrix_room_power_levels (Resource)
@@ -16,11 +17,13 @@ Manages the m.room.power_levels state event for a single room. Works on any room
 
 Fields you do not declare keep the value the homeserver already has. The provider reads the current event, overlays the fields you declared, and writes the result back. A declared `users` or `events` map is the exception: it replaces that map completely, so that you can remove an entry.
 
-**Warning: self-lockout risk.** A `users` map that omits the account the provider runs as drops that account to `users_default`. Below `state_default`, the account can no longer change the room's power levels, and `terraform destroy` does not undo it, because power levels cannot be deleted. Add `(data.matrix_whoami.me.user_id) = 100` to `users`.
+**Warning: self-lockout risk.** A `users` map that omits the account the provider runs as drops that account to `users_default`. Below `state_default`, the account can no longer change the room's power levels, and `terraform destroy` does not undo it, because power levels cannot be deleted. Add `(data.matrix_whoami.me.user_id) = 100` to `users`, unless that account created the room in a version 12 room: see below.
 
 Dropping `users_default` below `state_default` does the same thing whenever your account has no entry of its own in `users`. Raising `state_default` is not a risk on its own: the homeserver refuses any power value above the sender's own level, so that apply fails instead of locking you out.
 
-This applies to accounts whose power comes from `users`. In room version 12 and later, the account that created the room keeps its power whatever `users` says.
+This applies to accounts whose power comes from `users`. In room version 12 and later, the account that created the room keeps its power whatever `users` says, and must **not** appear in `users` at all: a homeserver rejects any `m.room.power_levels` event that lists a room creator. The provider reports that at plan time.
+
+Keys this provider does not model, such as Synapse's `historical`, are preserved. A write merges into the room's current event rather than replacing it.
 
 ## Example Usage
 
@@ -40,6 +43,10 @@ resource "matrix_room_power_levels" "example" {
   # A declared users map replaces the whole map on the homeserver, so always
   # list the account the provider runs as. Leave it out and that account drops
   # to users_default, below state_default, and loses control of the room.
+  #
+  # The exception is a room version 12 room that this same account created. A
+  # creator keeps its power without an entry, and a homeserver rejects any
+  # m.room.power_levels event that lists a creator, so drop the line below.
   users = {
     (data.matrix_whoami.me.user_id) = 100
     "@alice:example.com"            = 100

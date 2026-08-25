@@ -2,8 +2,11 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -59,9 +62,10 @@ func (r *powerLevelsResource) Schema(_ context.Context, _ resource.SchemaRequest
 	resp.Schema = schema.Schema{
 		Description: "Manages the m.room.power_levels state event for a single room. Works on any room-like entity, including spaces — point `room_id` at a matrix_space.id to tune its permissions (e.g. to unlock messages in a space, set `events_default = 0`).\n\n" +
 			"Fields you do not declare keep the value the homeserver already has. The provider reads the current event, overlays the fields you declared, and writes the result back. A declared `users` or `events` map is the exception: it replaces that map completely, so that you can remove an entry.\n\n" +
-			"**Warning: self-lockout risk.** A `users` map that omits the account the provider runs as drops that account to `users_default`. Below `state_default`, the account can no longer change the room's power levels, and `terraform destroy` does not undo it, because power levels cannot be deleted. Add `(data.matrix_whoami.me.user_id) = 100` to `users`.\n\n" +
+			"**Warning: self-lockout risk.** A `users` map that omits the account the provider runs as drops that account to `users_default`. Below `state_default`, the account can no longer change the room's power levels, and `terraform destroy` does not undo it, because power levels cannot be deleted. Add `(data.matrix_whoami.me.user_id) = 100` to `users`, unless that account created the room in a version 12 room: see below.\n\n" +
 			"Dropping `users_default` below `state_default` does the same thing whenever your account has no entry of its own in `users`. Raising `state_default` is not a risk on its own: the homeserver refuses any power value above the sender's own level, so that apply fails instead of locking you out.\n\n" +
-			"This applies to accounts whose power comes from `users`. In room version 12 and later, the account that created the room keeps its power whatever `users` says.",
+			"This applies to accounts whose power comes from `users`. In room version 12 and later, the account that created the room keeps its power whatever `users` says, and must **not** appear in `users` at all: a homeserver rejects any `m.room.power_levels` event that lists a room creator. The provider reports that at plan time.\n\n" +
+			"Keys this provider does not model, such as Synapse's `historical`, are preserved. A write merges into the room's current event rather than replacing it.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed: true, Description: "Equal to room_id.",
@@ -94,71 +98,100 @@ func (r *powerLevelsResource) Configure(_ context.Context, req resource.Configur
 	r.client = c
 }
 
-// applyModelToPowerLevels overlays the attributes the plan decided onto pl and
-// leaves every other field of pl untouched.
+// applyModelToRawPowerLevels overlays the attributes the plan decided onto raw
+// and leaves every other key untouched, including keys mautrix does not model.
 //
 // m.room.power_levels has no partial-update semantics: sendState replaces the
-// whole event. Any field this function does not write must already be present
-// in pl, or the homeserver loses it. See issue #29.
+// whole event. Any key this function does not write must already be in raw, or
+// the homeserver loses it. See issues #29 and #37.
 //
 // A declared users/events map replaces the whole map, so that entries can be
 // removed. That is also why a users map that omits the caller locks it out —
 // see powerLevelsSelfLockoutWarnings.
-func applyModelToPowerLevels(ctx context.Context, pl *event.PowerLevelsEventContent, m *powerLevelsModel) error {
+func applyModelToRawPowerLevels(ctx context.Context, raw map[string]json.RawMessage, m *powerLevelsModel) error {
+	if raw == nil {
+		// Writing to a nil map panics, and this cannot allocate one for the
+		// caller. fetchPowerLevels guarantees non-nil; refuse rather than take
+		// the provider process down if that ever stops being true.
+		return errors.New("power levels content is nil")
+	}
 	// All Int64 fields are Optional+Computed: skip when null (user didn't
 	// declare; keep whatever the server has) or unknown (Computed value not yet
-	// resolved during Create). Skipping leaves the base value in place.
-	set := func(field types.Int64) (int, bool) {
+	// resolved during Create). Skipping leaves the key alone.
+	set := func(key string, field types.Int64) {
 		if field.IsNull() || field.IsUnknown() {
-			return 0, false
+			return
 		}
-		return int(field.ValueInt64()), true
+		raw[key] = json.RawMessage(strconv.FormatInt(field.ValueInt64(), 10))
 	}
-	if v, ok := set(m.UsersDefault); ok {
-		pl.UsersDefault = v
+	// users_default and events_default are the only keys whose absence and whose
+	// zero mean the same thing. Writing an explicit 0 over an absent key would
+	// rewrite the power levels of every managed room on the first apply after an
+	// upgrade, for no change in meaning, and an explicit value is auth-checked
+	// against the sender's own level where an absent one is not. So leave it be.
+	setDefault := func(key string, field types.Int64) {
+		if field.IsNull() || field.IsUnknown() {
+			return
+		}
+		if _, present := raw[key]; !present && field.ValueInt64() == 0 {
+			return
+		}
+		raw[key] = json.RawMessage(strconv.FormatInt(field.ValueInt64(), 10))
 	}
-	if v, ok := set(m.EventsDefault); ok {
-		pl.EventsDefault = v
-	}
-	if v, ok := set(m.StateDefault); ok {
-		pl.StateDefaultPtr = &v
-	}
-	if v, ok := set(m.Ban); ok {
-		pl.BanPtr = &v
-	}
-	if v, ok := set(m.Kick); ok {
-		pl.KickPtr = &v
-	}
-	if v, ok := set(m.Invite); ok {
-		pl.InvitePtr = &v
-	}
-	if v, ok := set(m.Redact); ok {
-		pl.RedactPtr = &v
-	}
-	if !m.Users.IsNull() && !m.Users.IsUnknown() {
-		raw := map[string]int64{}
-		if diags := m.Users.ElementsAs(ctx, &raw, false); diags.HasError() {
+	setMap := func(key string, field types.Map) error {
+		if field.IsNull() || field.IsUnknown() {
+			return nil
+		}
+		values := map[string]int64{}
+		if diags := field.ElementsAs(ctx, &values, false); diags.HasError() {
 			return errorFromDiags(diags)
 		}
-		pl.Users = make(map[id.UserID]int, len(raw))
-		for k, v := range raw {
-			pl.Users[id.UserID(k)] = int(v)
+		encoded, err := json.Marshal(values)
+		if err != nil {
+			return err
 		}
+		raw[key] = encoded
+		return nil
 	}
-	if !m.Events.IsNull() && !m.Events.IsUnknown() {
-		raw := map[string]int64{}
-		if diags := m.Events.ElementsAs(ctx, &raw, false); diags.HasError() {
-			return errorFromDiags(diags)
-		}
-		pl.Events = make(map[string]int, len(raw))
-		for k, v := range raw {
-			pl.Events[k] = int(v)
-		}
+
+	setDefault("users_default", m.UsersDefault)
+	setDefault("events_default", m.EventsDefault)
+	set("state_default", m.StateDefault)
+	set("ban", m.Ban)
+	set("kick", m.Kick)
+	set("invite", m.Invite)
+	set("redact", m.Redact)
+	if err := setMap("users", m.Users); err != nil {
+		return err
 	}
-	if v, ok := set(m.NotifyRoom); ok {
-		pl.Notifications = &event.NotificationPowerLevels{RoomPtr: &v}
+	if err := setMap("events", m.Events); err != nil {
+		return err
+	}
+	if !m.NotifyRoom.IsNull() && !m.NotifyRoom.IsUnknown() {
+		setNotificationRoom(raw, m.NotifyRoom.ValueInt64())
 	}
 	return nil
+}
+
+// setNotificationRoom sets notifications.room and keeps every sibling key.
+//
+// Never fails. Room versions before 10 allow notifications to hold something
+// that is not an object, null included, so anything that does not decode as one
+// is replaced outright, which is what the typed path always did.
+func setNotificationRoom(raw map[string]json.RawMessage, level int64) {
+	encoded := json.RawMessage(strconv.FormatInt(level, 10))
+	notifications := map[string]json.RawMessage{}
+	if existing, ok := raw["notifications"]; ok {
+		if err := json.Unmarshal(existing, &notifications); err != nil || notifications == nil {
+			notifications = map[string]json.RawMessage{}
+		}
+	}
+	notifications["room"] = encoded
+	if merged, err := json.Marshal(notifications); err == nil {
+		raw["notifications"] = merged
+	} else {
+		raw["notifications"] = json.RawMessage(`{"room":` + string(encoded) + `}`)
+	}
 }
 
 func modelFromPowerLevels(ctx context.Context, pl *event.PowerLevelsEventContent, m *powerLevelsModel) error {
@@ -237,15 +270,45 @@ func isKnownEmptyMap(v types.Map) bool {
 	return !v.IsNull() && !v.IsUnknown() && len(v.Elements()) == 0
 }
 
-// fetchPowerLevels reads the room's current m.room.power_levels. An absent
-// event gives an empty content and found=false, not an error.
-func fetchPowerLevels(ctx context.Context, c *Client, roomID id.RoomID) (*event.PowerLevelsEventContent, bool, error) {
-	pl := &event.PowerLevelsEventContent{}
-	found, err := getState(ctx, c, roomID, event.StatePowerLevels, "", pl)
+// fetchPowerLevels reads the room's current m.room.power_levels as the raw JSON
+// object. An absent event gives an empty map and found=false, not an error.
+//
+// Raw rather than typed. event.PowerLevelsEventContent models ten keys, and
+// sendState replaces the whole event, so a typed round trip silently drops
+// everything else. Rooms really do carry more: Synapse writes "historical", and
+// NotificationPowerLevels models only "room". See issue #37.
+//
+// The map is never nil. getState leaves out untouched on a 404, and a JSON null
+// body makes encoding/json zero the destination. A nil map reads fine and panics
+// on write, which would take the whole provider process down.
+func fetchPowerLevels(ctx context.Context, c *Client, roomID id.RoomID) (map[string]json.RawMessage, bool, error) {
+	raw := map[string]json.RawMessage{}
+	found, err := getState(ctx, c, roomID, event.StatePowerLevels, "", &raw)
 	if err != nil {
-		return nil, false, err
+		return map[string]json.RawMessage{}, false, err
 	}
-	return pl, found, nil
+	if raw == nil {
+		raw = map[string]json.RawMessage{}
+	}
+	return raw, found, nil
+}
+
+// typedPowerLevels decodes a raw power levels object into the struct the model
+// mapping needs. Never returns a nil struct without an error.
+//
+// This fails on exactly the contents the old typed read already failed on: room
+// versions before 10 allow a power level to be a JSON string, and versions
+// before 6 allow a float.
+func typedPowerLevels(raw map[string]json.RawMessage) (*event.PowerLevelsEventContent, error) {
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	pl := &event.PowerLevelsEventContent{}
+	if err := json.Unmarshal(encoded, pl); err != nil {
+		return nil, fmt.Errorf("power levels content is not integer-only, which room versions before 10 allow: %w", err)
+	}
+	return pl, nil
 }
 
 // resolveUnknownPowerLevels fills in only the attributes the plan left unknown,
@@ -307,9 +370,8 @@ func resolveUnknownPowerLevels(ctx context.Context, pl *event.PowerLevelsEventCo
 // returns what was just sent, one round trip later and open to a
 // read-your-writes race on a homeserver with separate read workers.
 //
-// Known limit: keys mautrix does not model, such as Synapse's "historical",
-// don't survive the typed round trip. That predates this function; a complete
-// fix needs a raw JSON merge.
+// The merge is over the raw JSON object, so keys mautrix does not model survive
+// the write. See issue #37.
 func (r *powerLevelsResource) applyPowerLevels(ctx context.Context, m *powerLevelsModel, diags *diag.Diagnostics) {
 	roomID := id.RoomID(m.RoomID.ValueString())
 	merged, _, err := fetchPowerLevels(ctx, r.client, roomID)
@@ -317,15 +379,23 @@ func (r *powerLevelsResource) applyPowerLevels(ctx context.Context, m *powerLeve
 		diags.AddError("Failed to read m.room.power_levels", err.Error())
 		return
 	}
-	if err := applyModelToPowerLevels(ctx, merged, m); err != nil {
+	if err := applyModelToRawPowerLevels(ctx, merged, m); err != nil {
 		diags.AddError("Invalid power_levels attributes", err.Error())
+		return
+	}
+	// Decode before sending, not after. A decode failure after a successful send
+	// leaves the event in the room and no state in Terraform, which orphans the
+	// resource; failing here costs nothing.
+	typed, err := typedPowerLevels(merged)
+	if err != nil {
+		diags.AddError("Failed to map power_levels into state", err.Error())
 		return
 	}
 	if err := sendState(ctx, r.client, roomID, event.StatePowerLevels, "", merged); err != nil {
 		diags.AddError("Failed to set m.room.power_levels", err.Error())
 		return
 	}
-	if err := resolveUnknownPowerLevels(ctx, merged, m); err != nil {
+	if err := resolveUnknownPowerLevels(ctx, typed, m); err != nil {
 		diags.AddError("Failed to map power_levels into state", err.Error())
 	}
 }
@@ -510,13 +580,25 @@ func (r *powerLevelsResource) ModifyPlan(ctx context.Context, req resource.Modif
 		return
 	}
 	caller := callerUserID(r.client)
+	declared := !plan.Users.IsNull() && !plan.Users.IsUnknown()
 	warnings := powerLevelsSelfLockoutWarnings(caller, &plan, r.priorPowerLevels(ctx, req, &plan))
-	if len(warnings) == 0 {
+	if !declared && len(warnings) == 0 {
+		// Neither check below can fire, so do not pay for the create event.
 		return
 	}
-	// Only now, because this costs a request: a room creator with privileged
-	// creator power cannot be demoted through the users map at all.
-	if r.callerHasCreatorPower(ctx, &plan, caller) {
+	creators, privileged := r.roomCreators(ctx, &plan)
+	if privileged && declared {
+		for _, creator := range creatorsInUsers(plan.Users, creators) {
+			resp.Diagnostics.AddAttributeError(path.Root("users"), "Room creator listed in users",
+				fmt.Sprintf("`users` lists %q, which created this room. From room version 12 a homeserver "+
+					"rejects any m.room.power_levels event that lists a room creator, so this apply cannot "+
+					"succeed. A creator keeps its power without an entry: remove %q from `users`.",
+					creator, creator))
+		}
+	}
+	if privileged && slices.Contains(creators, id.UserID(caller)) {
+		// A creator's power comes from m.room.create, so no users map can take
+		// it away. Nothing to warn about.
 		return
 	}
 	for _, w := range warnings {
@@ -524,16 +606,32 @@ func (r *powerLevelsResource) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 }
 
-// callerHasCreatorPower reports whether the caller's power comes from
-// m.room.create rather than from the power levels event. From room version 12 a
-// room's creators hold power that no users map can take away, and the Matrix
-// auth rules skip every power level check for them.
+// creatorsInUsers returns the creators that a declared users map lists. Pure
+// function — no client/network access.
+func creatorsInUsers(users types.Map, creators []id.UserID) []id.UserID {
+	if users.IsNull() || users.IsUnknown() {
+		return nil
+	}
+	var listed []id.UserID
+	for _, creator := range creators {
+		if _, ok := users.Elements()[string(creator)]; ok {
+			listed = append(listed, creator)
+		}
+	}
+	return listed
+}
+
+// roomCreators returns the accounts whose power comes from m.room.create rather
+// than from the power levels event, and whether the room version grants them
+// that. From room version 12 those accounts hold power no users map can take
+// away, and the auth rules skip every power level check for them. They must also
+// not appear in users at all: the homeserver rejects an event that lists one.
 //
-// Best effort: an unreadable room returns false, which costs a warning that may
-// not apply. The warning text names the same case for that reason.
-func (r *powerLevelsResource) callerHasCreatorPower(ctx context.Context, plan *powerLevelsModel, caller string) bool {
-	if r.client == nil || caller == "" || plan.RoomID.IsNull() || plan.RoomID.IsUnknown() {
-		return false
+// Best effort: an unreadable room returns nothing, which costs a warning that
+// may not apply and skips the creator error. The warning text names that case.
+func (r *powerLevelsResource) roomCreators(ctx context.Context, plan *powerLevelsModel) ([]id.UserID, bool) {
+	if r.client == nil || plan.RoomID.IsNull() || plan.RoomID.IsUnknown() {
+		return nil, false
 	}
 	// FullStateEvent rather than getCreateContent: this needs the create event's
 	// sender, and only the whole event carries it. That endpoint depends on a
@@ -541,13 +639,13 @@ func (r *powerLevelsResource) callerHasCreatorPower(ctx context.Context, plan *p
 	// without it just means no suppression, and the warning text says so.
 	evt, err := r.client.MX.FullStateEvent(ctx, id.RoomID(plan.RoomID.ValueString()), event.StateCreate, "")
 	if err != nil || evt == nil {
-		return false
+		return nil, false
 	}
 	create := evt.Content.AsCreate()
 	if create == nil || !create.RoomVersion.PrivilegedRoomCreators() {
-		return false
+		return nil, false
 	}
-	return evt.Sender == id.UserID(caller) || slices.Contains(create.AdditionalCreators, id.UserID(caller))
+	return append([]id.UserID{evt.Sender}, create.AdditionalCreators...), true
 }
 
 // priorPowerLevels returns what the room holds today: the prior state on an
@@ -578,8 +676,12 @@ func (r *powerLevelsResource) priorPowerLevels(ctx context.Context, req resource
 	if r.client == nil || plan.RoomID.IsNull() || plan.RoomID.IsUnknown() {
 		return nil
 	}
-	pl, found, err := fetchPowerLevels(ctx, r.client, id.RoomID(plan.RoomID.ValueString()))
+	raw, found, err := fetchPowerLevels(ctx, r.client, id.RoomID(plan.RoomID.ValueString()))
 	if err != nil || !found {
+		return nil
+	}
+	pl, err := typedPowerLevels(raw)
+	if err != nil {
 		return nil
 	}
 	if err := modelFromPowerLevels(ctx, pl, &prior); err != nil {
@@ -608,13 +710,18 @@ func (r *powerLevelsResource) Read(ctx context.Context, req resource.ReadRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	pl, found, err := fetchPowerLevels(ctx, r.client, id.RoomID(state.RoomID.ValueString()))
+	raw, found, err := fetchPowerLevels(ctx, r.client, id.RoomID(state.RoomID.ValueString()))
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to read m.room.power_levels", err.Error())
 		return
 	}
 	if !found {
 		resp.State.RemoveResource(ctx)
+		return
+	}
+	pl, err := typedPowerLevels(raw)
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read m.room.power_levels", err.Error())
 		return
 	}
 	if err := modelFromPowerLevels(ctx, pl, &state); err != nil {
