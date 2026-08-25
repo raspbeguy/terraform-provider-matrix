@@ -58,13 +58,16 @@ jobs:
           MATRIX_HOMESERVER_URL: http://localhost:8008
           MATRIX_ACCESS_TOKEN: ${{ steps.register.outputs.token }}
           MATRIX_USER_ID: "@tf:localhost"
-          TF_ACC_TERRAFORM_PATH: tofu
           # The harness reattaches the in-process provider under this address,
           # which has to match the source the test configs declare. Terraform
           # users leave both unset and declare hashicorp/matrix instead.
           TF_ACC_PROVIDER_HOST: registry.opentofu.org
           TF_ACC_PROVIDER_NAMESPACE: raspbeguy
-        run: go test -v -timeout 25m ./internal/provider/... -run '^TestAcc'
+        # TF_ACC_TERRAFORM_PATH has to be absolute, so it is resolved here
+        # rather than set to a bare name in the env block above.
+        run: |
+          TF_ACC_TERRAFORM_PATH="$(command -v tofu)" \
+            go test -v -timeout 25m ./internal/provider/... -run '^TestAcc'
 
       - name: Synapse logs on failure
         if: failure()
