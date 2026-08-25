@@ -289,11 +289,8 @@ func (r *roomResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := leaveRoomBestEffort(ctx, r.client, id.RoomID(state.ID.ValueString())); err != nil {
-		// Best-effort: log a warning but don't fail destroy — the user may already have left.
-		resp.Diagnostics.AddWarning("Leaving room on destroy failed",
-			"Removed resource from state anyway. Server message: "+err.Error())
-	}
+	err := leaveRoom(ctx, r.client, id.RoomID(state.ID.ValueString()))
+	failedDestroy(&resp.Diagnostics, "Leaving room on destroy failed", err)
 }
 
 // wrongResourceTypeDetail reports the mismatch when a room ID is imported into

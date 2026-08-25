@@ -175,6 +175,13 @@ containerized Synapse.
   changes and not refreshed on `terraform refresh`.
 - Membership transitions are idempotent: re-invoking `invite` on someone who's
   already `join` is a no-op (not a forbidden state event).
+- A destroy that the homeserver refuses is an error, not a warning. `terraform
+  destroy` used to report success over work it never did, so a teardown could
+  exit 0 with people still in rooms. The usual cause is power: kicking anyone
+  but the account the provider runs as needs the kick level, 50 by default. The
+  resource stays in state, so fix the cause and destroy again. Use `terraform
+  state rm` to drop it without touching the homeserver. A target the homeserver
+  no longer has is still success, since there is nothing left to do.
 - `matrix_room_member` is declarative: if a user accepts the invite and later
   leaves the room, the next `terraform apply` will re-invite them, because the HCL
   still says `membership = "invite"`. To stop reconciling, either

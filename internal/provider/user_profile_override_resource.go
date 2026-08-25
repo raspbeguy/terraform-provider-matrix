@@ -199,8 +199,11 @@ func (r *userProfileOverrideResource) Delete(ctx context.Context, req resource.D
 	var diags diag.Diagnostics
 	r.applyOverride(ctx, &clear, &diags)
 	if diags.HasError() {
-		resp.Diagnostics.AddWarning("Failed to clear per-room profile override on destroy",
-			"Resource removed from state anyway. Server message: "+diagsError(diags).Error())
+		// applyOverride yields diagnostics rather than a typed error, and
+		// diagsError flattens them to strings, so notFoundErr cannot see through
+		// it. Same rule as failedDestroy, applied by hand.
+		resp.Diagnostics.AddError("Failed to clear per-room profile override on destroy",
+			diagsError(diags).Error()+destroyHint)
 	}
 }
 

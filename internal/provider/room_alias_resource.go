@@ -114,9 +114,8 @@ func (r *roomAliasResource) Delete(ctx context.Context, req resource.DeleteReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if _, err := r.client.MX.DeleteAlias(ctx, id.RoomAlias(state.Alias.ValueString())); err != nil {
-		resp.Diagnostics.AddWarning("Alias delete failed", err.Error())
-	}
+	_, err := r.client.MX.DeleteAlias(ctx, id.RoomAlias(state.Alias.ValueString()))
+	failedDestroy(&resp.Diagnostics, "Alias delete failed", err)
 }
 
 func (r *roomAliasResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

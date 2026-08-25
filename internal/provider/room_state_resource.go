@@ -142,10 +142,9 @@ func (r *roomStateResource) Delete(ctx context.Context, req resource.DeleteReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := sendState(ctx, r.client, id.RoomID(state.RoomID.ValueString()),
-		event.NewEventType(state.EventType.ValueString()), state.StateKey.ValueString(), map[string]any{}); err != nil {
-		resp.Diagnostics.AddWarning("Failed to clear state event", err.Error())
-	}
+	err := sendState(ctx, r.client, id.RoomID(state.RoomID.ValueString()),
+		event.NewEventType(state.EventType.ValueString()), state.StateKey.ValueString(), map[string]any{})
+	failedDestroy(&resp.Diagnostics, "Failed to clear state event", err)
 }
 
 func (r *roomStateResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

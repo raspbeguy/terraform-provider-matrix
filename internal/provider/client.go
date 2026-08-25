@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 
 	"maunium.net/go/mautrix"
@@ -50,6 +51,24 @@ func notFoundErr(err error) bool {
 		return true
 	}
 	return httpErr.Response != nil && httpErr.Response.StatusCode == 404
+}
+
+// destroyHint is appended to every failed-destroy error. Without it a
+// practitioner is told the destroy failed and not how to get unstuck.
+const destroyHint = " The resource stays in state. Fix the cause and run destroy" +
+	" again, or use `terraform state rm` to drop it without touching the homeserver."
+
+// failedDestroy records a destroy that could not do its work.
+//
+// A homeserver that no longer holds the thing being removed is success: there is
+// nothing left to do, so a 404 is ignored. Everything else is a refusal, and
+// reporting one as a warning lets a destroy claim it removed something it never
+// did, with exit status 0. See issue #45.
+func failedDestroy(diags *diag.Diagnostics, summary string, err error) {
+	if err == nil || notFoundErr(err) {
+		return
+	}
+	diags.AddError(summary, err.Error()+destroyHint)
 }
 
 // getState fetches a state event and unmarshals it into out. Returns (found, error).

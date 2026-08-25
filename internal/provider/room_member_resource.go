@@ -206,10 +206,11 @@ func (r *roomMemberResource) Delete(ctx context.Context, req resource.DeleteRequ
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	// Best-effort: kick on destroy. If the user is already gone we swallow the error.
-	if err := applyMembership(ctx, r.client, id.RoomID(state.RoomID.ValueString()), id.UserID(state.UserID.ValueString()), "leave", ""); err != nil {
-		resp.Diagnostics.AddWarning("Membership cleanup on destroy failed", err.Error())
-	}
+	// applyMembership already returns nil when the membership is leave or ban, so
+	// an error here means the homeserver refused a change that still has to
+	// happen. Kicking anyone but the caller needs the kick level, 50 by default.
+	err := applyMembership(ctx, r.client, id.RoomID(state.RoomID.ValueString()), id.UserID(state.UserID.ValueString()), "leave", "")
+	failedDestroy(&resp.Diagnostics, "Membership cleanup on destroy failed", err)
 }
 
 func (r *roomMemberResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
