@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -121,6 +122,19 @@ func createRoomLike(ctx context.Context, c *Client, m *baseRoomModel, encryption
 		diags.AddError("Failed to create room", err.Error())
 		return ""
 	}
+	// /createRoom carries visibility, but a homeserver is free to ignore it,
+	// through its room_list_publication_rules. Read the directory back and say
+	// so, rather than let the room quietly differ from the configuration. State
+	// keeps the declared value: Terraform rejects an applied value that differs
+	// from a known config value.
+	if !m.Visibility.IsNull() && !m.Visibility.IsUnknown() {
+		want := m.Visibility.ValueString()
+		if got, found, err := getRoomVisibility(ctx, c, resp.RoomID); err == nil && found && got != want {
+			diags.AddWarning("Directory visibility not honoured",
+				"The homeserver reports "+string(resp.RoomID)+" as "+got+", not the requested "+want+
+					". Its room_list_publication_rules may forbid publishing this room.")
+		}
+	}
 	return resp.RoomID
 }
 
@@ -153,6 +167,23 @@ func syncMutableStateFromModel(ctx context.Context, c *Client, roomID id.RoomID,
 		}
 		if err := sendState(ctx, c, roomID, event.StateRoomAvatar, "", content); err != nil {
 			diags.AddError("Failed to set room avatar", err.Error())
+		}
+	}
+	// Directory visibility. Unlike the state events above this is not room state,
+	// it is the homeserver's public room directory. A homeserver may refuse the
+	// write, or accept it and not honour it, so read the value back and warn
+	// rather than fail. State keeps the declared value either way: Terraform
+	// rejects an applied value that differs from a known config value.
+	if !plan.Visibility.IsNull() && !plan.Visibility.Equal(prior.Visibility) {
+		want := plan.Visibility.ValueString()
+		if err := setRoomVisibility(ctx, c, roomID, want); err != nil {
+			diags.AddWarning("Failed to set directory visibility",
+				"The homeserver refused to set the directory visibility of "+string(roomID)+" to "+want+
+					": "+err.Error()+". Its room_list_publication_rules may forbid it.")
+		} else if got, found, err := getRoomVisibility(ctx, c, roomID); err == nil && found && got != want {
+			diags.AddWarning("Directory visibility not honoured",
+				"The homeserver reports "+string(roomID)+" as "+got+" after it was set to "+want+
+					". Its room_list_publication_rules may forbid it.")
 		}
 	}
 	// History visibility. Skip when plan is null — the attribute is Optional+Computed,
@@ -235,7 +266,94 @@ func readRoomLikeState(ctx context.Context, c *Client, roomID id.RoomID, m *base
 	} else {
 		m.HistoryVisibility = types.StringNull()
 	}
+
+	readCreateOnlyState(ctx, c, roomID, m, &canon)
 }
+
+// readCreateOnlyState fills the attributes that /createRoom takes but that the
+// room does not report back the same way. Without it, an imported room leaves
+// them null and the first plan reads a configured value as a change. See #32.
+//
+// One rule throughout: touch an attribute only when the model has no value of
+// its own, meaning null after an import or unknown during Create. Anything the
+// model already decided is left alone, because the provider cannot change these
+// after creation and refreshing them would fight a value it can never reconcile.
+//
+// An unknown must always come out known, or Terraform rejects the apply. So
+// every branch below ends by assigning something, null included, and a failed
+// read costs a value rather than the whole refresh. Contrast the five reads in
+// readRoomLikeState, where a missing event means a broken room and an error is
+// the right answer.
+func readCreateOnlyState(ctx context.Context, c *Client, roomID id.RoomID, m *baseRoomModel, canon *event.CanonicalAliasEventContent) {
+	if unset(m.RoomVersion) {
+		version := types.StringNull()
+		if create, found, err := getCreateContent(ctx, c, roomID); err == nil && found {
+			v := string(create.RoomVersion)
+			if v == "" {
+				// id.RoomV0 is the empty string, and the spec reads an absent
+				// room_version as version 1.
+				v = "1"
+			}
+			version = types.StringValue(v)
+		}
+		m.RoomVersion = version
+	}
+
+	if unset(m.RoomAliasName) {
+		alias := types.StringNull()
+		if canon.Alias != "" {
+			// id.RoomAlias has no Localpart method; this splitter strips the #
+			// sigil and everything from the first colon.
+			if _, localpart, _ := id.ParseCommonIdentifier(canon.Alias); localpart != "" {
+				alias = types.StringValue(localpart)
+			}
+		}
+		m.RoomAliasName = alias
+	}
+
+	if unset(m.Visibility) {
+		visibility := types.StringNull()
+		if vis, found, err := getRoomVisibility(ctx, c, roomID); err == nil && found && vis != "" {
+			visibility = types.StringValue(vis)
+		}
+		m.Visibility = visibility
+	}
+
+	// preset is a creation-time macro over join rules, history visibility and
+	// guest access, and no endpoint reports it. Deriving it from those three
+	// would fight matrix_room_join_rules, which manages one of them directly.
+	// initial_invites is a one-shot list with nothing to compare against.
+	if m.Preset.IsUnknown() {
+		m.Preset = types.StringNull()
+	}
+	if m.InitialInvites.IsUnknown() {
+		m.InitialInvites = types.SetNull(types.StringType)
+	}
+}
+
+// readRoomOnlyState does the same for the create-only attributes that live on
+// roomModel rather than baseRoomModel, which readRoomLikeState cannot reach.
+//
+// is_direct has nothing to read: /createRoom only sets the flag on the invite
+// member events, and the sender's own m.direct account data is a client
+// convention that Synapse does not maintain.
+func readRoomOnlyState(ctx context.Context, c *Client, roomID id.RoomID, m *roomModel) {
+	if unset(m.Encryption) {
+		encrypted := types.BoolNull()
+		var enc event.EncryptionEventContent
+		if found, err := getState(ctx, c, roomID, event.StateEncryption, "", &enc); err == nil {
+			encrypted = types.BoolValue(found && enc.Algorithm != "")
+		}
+		m.Encryption = encrypted
+	}
+	if m.IsDirect.IsUnknown() {
+		m.IsDirect = types.BoolNull()
+	}
+}
+
+// unset reports whether an attribute carries no value the model decided itself:
+// null after an import, or unknown while Create resolves a Computed attribute.
+func unset(v attr.Value) bool { return v.IsNull() || v.IsUnknown() }
 
 // leaveRoomBestEffort is used on resource Delete: we can't delete a room server-side,
 // but we can leave it so it disappears from the caller's view.

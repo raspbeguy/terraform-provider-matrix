@@ -535,6 +535,10 @@ func (r *powerLevelsResource) callerHasCreatorPower(ctx context.Context, plan *p
 	if r.client == nil || caller == "" || plan.RoomID.IsNull() || plan.RoomID.IsUnknown() {
 		return false
 	}
+	// FullStateEvent rather than getCreateContent: this needs the create event's
+	// sender, and only the whole event carries it. That endpoint depends on a
+	// ?format=event query parameter which is not in the spec, so a homeserver
+	// without it just means no suppression, and the warning text says so.
 	evt, err := r.client.MX.FullStateEvent(ctx, id.RoomID(plan.RoomID.ValueString()), event.StateCreate, "")
 	if err != nil || evt == nil {
 		return false

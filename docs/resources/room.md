@@ -30,16 +30,16 @@ resource "matrix_room" "example" {
 ### Optional
 
 - `avatar_url` (String) Avatar mxc:// URI (m.room.avatar).
-- `encryption_enabled` (Boolean) If true, enable end-to-end encryption at creation time. Cannot be disabled once set.
+- `encryption_enabled` (Boolean) If true, enable end-to-end encryption at creation time. Cannot be disabled once set. On import, adopted from m.room.encryption.
 - `history_visibility` (String) Controls who can read the timeline: joined | invited | shared | world_readable. If unset, reflects the homeserver's default. Updatable after creation.
 - `initial_invites` (Set of String) User IDs to invite during room creation. Subsequent changes are ignored — use matrix_room_member.
-- `is_direct` (Boolean) Mark the room as a direct chat.
+- `is_direct` (Boolean) Mark the room as a direct chat. Applies at creation only, and no endpoint reports it back, so an imported room records it on the first apply.
 - `name` (String) Room name (m.room.name).
-- `preset` (String) Creation preset: private_chat | trusted_private_chat | public_chat.
-- `room_alias_name` (String) Localpart of the canonical alias to set at creation.
-- `room_version` (String) Room version (e.g. "11").
+- `preset` (String) Creation preset: private_chat | trusted_private_chat | public_chat. Applies at creation only, and no endpoint reports it back, so an imported room records it on the first apply.
+- `room_alias_name` (String) Localpart of the canonical alias to set at creation. On import, adopted from the room's canonical alias when it is local to this homeserver.
+- `room_version` (String) Room version (e.g. "11"). If unset, reflects the version the homeserver chose. A room's version never changes; an upgrade creates a new room.
 - `topic` (String) Room topic (m.room.topic).
-- `visibility` (String) Directory visibility: public | private.
+- `visibility` (String) Directory visibility: public | private. Updatable after creation. A homeserver may refuse to publish a room, through its room_list_publication_rules, in which case the provider warns and the directory keeps its own value.
 
 ### Read-Only
 
@@ -53,6 +53,14 @@ Import is supported using the following syntax:
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-# Import by room ID (starts with !, ends with :homeserver).
+# Import by room ID (starts with !, ends with :homeserver). The provider checks
+# creation_content.type and refuses to import a space as a matrix_room.
 terraform import matrix_room.example '!abcDEF:example.com'
+
+# The import reads back what the homeserver reports: room_version, visibility,
+# room_alias_name and encryption_enabled. Three attributes have no endpoint that
+# reports them, so they stay null in state: preset, is_direct and
+# initial_invites. If your configuration sets any of them, the first plan after
+# the import shows an in-place update. That apply changes nothing on the
+# homeserver. It records the declared values, and every later plan is clean.
 ```

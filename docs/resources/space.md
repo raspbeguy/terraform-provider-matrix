@@ -30,11 +30,11 @@ resource "matrix_space" "example" {
 - `history_visibility` (String) Controls who can read the timeline: joined | invited | shared | world_readable. If unset, reflects the homeserver's default. Updatable after creation.
 - `initial_invites` (Set of String) User IDs to invite during room creation. Subsequent changes are ignored — use matrix_room_member.
 - `name` (String) Room name (m.room.name).
-- `preset` (String) Creation preset: private_chat | trusted_private_chat | public_chat.
-- `room_alias_name` (String) Localpart of the canonical alias to set at creation.
-- `room_version` (String) Room version (e.g. "11").
+- `preset` (String) Creation preset: private_chat | trusted_private_chat | public_chat. Applies at creation only, and no endpoint reports it back, so an imported room records it on the first apply.
+- `room_alias_name` (String) Localpart of the canonical alias to set at creation. On import, adopted from the room's canonical alias when it is local to this homeserver.
+- `room_version` (String) Room version (e.g. "11"). If unset, reflects the version the homeserver chose. A room's version never changes; an upgrade creates a new room.
 - `topic` (String) Room topic (m.room.topic).
-- `visibility` (String) Directory visibility: public | private.
+- `visibility` (String) Directory visibility: public | private. Updatable after creation. A homeserver may refuse to publish a room, through its room_list_publication_rules, in which case the provider warns and the directory keeps its own value.
 
 ### Read-Only
 
@@ -48,7 +48,15 @@ Import is supported using the following syntax:
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-# Import by space/room ID. A space is imported the same way as a room —
-# the creation_content.type on the server determines whether it's a space.
+# Import by space ID. A space is a room whose creation_content.type is m.space,
+# so the ID looks the same as a room's. The provider checks that type and
+# refuses to import a plain room as a matrix_space.
 terraform import matrix_space.example '!abcDEF:example.com'
+
+# The import reads back what the homeserver reports: room_version, visibility
+# and room_alias_name. Two attributes have no endpoint that reports them, so
+# they stay null in state: preset and initial_invites. If your configuration
+# sets either, the first plan after the import shows an in-place update. That
+# apply changes nothing on the homeserver. It records the declared values, and
+# every later plan is clean.
 ```
