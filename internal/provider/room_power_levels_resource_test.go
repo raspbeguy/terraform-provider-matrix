@@ -322,82 +322,234 @@ func TestModelFromPowerLevels_PopulatesMaps(t *testing.T) {
 }
 
 // TestPowerLevelsSelfLockoutWarnings covers the plan-time guard for the
-// irreversible half of issue #29: a declared users map replaces the map
-// wholesale, so omitting the account the provider runs as demotes it to
-// users_default. Below the level needed to send m.room.power_levels the account
-// cannot raise itself again, and destroy does not undo it.
+// irreversible half of issue #29, and the users_default hole reported as #33.
+//
+// The Matrix auth rules bound what can happen here, and they are the reason the
+// table looks the way it does. A sender may not set any power value above its
+// own level, so a plan that only raises state_default, or only raises
+// events["m.room.power_levels"], is rejected by the homeserver rather than
+// applied. A raise alone can therefore never lock the caller out.
+//
+// Every reachable silent lockout is a drop in the caller's own level:
+//
+//   - a declared users map that omits or demotes the caller, which is #29
+//   - a users_default drop when the caller has no entry of its own, which is #33
+//
+// Self-demotion is allowed by the auth rules, which is exactly why these are
+// silent and irreversible.
 func TestPowerLevelsSelfLockoutWarnings(t *testing.T) {
 	const caller = "@bot:example.com"
+	// What the room holds today: the caller at the given level, no state_default,
+	// so the spec default of 50 is the bar.
+	callerAt := func(level int64) *powerLevelsModel {
+		return &powerLevelsModel{Users: mustMap(t, map[string]int64{caller: level})}
+	}
+
 	cases := []struct {
-		name   string
-		caller string
-		model  *powerLevelsModel
-		want   int
+		name    string
+		caller  string
+		plan    *powerLevelsModel
+		prior   *powerLevelsModel
+		want    int
+		wantSub string
 	}{
 		{
-			name: "users undeclared is safe", caller: caller, want: 0,
-			// The merge in applyPowerLevels keeps the caller's existing entry.
-			model: &powerLevelsModel{Users: types.MapNull(types.Int64Type)},
+			name: "users undeclared and nothing changes", caller: caller, want: 0,
+			plan:  &powerLevelsModel{Users: types.MapNull(types.Int64Type)},
+			prior: callerAt(50),
 		},
 		{
-			name: "users unknown is safe", caller: caller, want: 0,
-			model: &powerLevelsModel{Users: types.MapUnknown(types.Int64Type)},
+			name: "users unknown and nothing changes", caller: caller, want: 0,
+			plan:  &powerLevelsModel{Users: types.MapUnknown(types.Int64Type)},
+			prior: callerAt(50),
 		},
 		{
 			name: "caller listed at 100", caller: caller, want: 0,
-			model: &powerLevelsModel{Users: mustMap(t, map[string]int64{caller: 100})},
+			plan: &powerLevelsModel{Users: mustMap(t, map[string]int64{caller: 100})},
 		},
 		{
 			name: "others only, falls back to users_default 0", caller: caller, want: 1,
-			model: &powerLevelsModel{Users: mustMap(t, map[string]int64{"@alice:example.com": 100})},
+			wantSub: "does not list your own account",
+			plan:    &powerLevelsModel{Users: mustMap(t, map[string]int64{"@alice:example.com": 100})},
 		},
 		{
 			name: "others only, but users_default is high enough", caller: caller, want: 0,
-			model: &powerLevelsModel{
+			plan: &powerLevelsModel{
 				Users:        mustMap(t, map[string]int64{"@alice:example.com": 100}),
 				UsersDefault: types.Int64Value(100),
 			},
 		},
 		{
 			name: "caller listed below state_default", caller: caller, want: 1,
-			model: &powerLevelsModel{
+			wantSub: "puts your own account",
+			plan: &powerLevelsModel{
 				Users:        mustMap(t, map[string]int64{caller: 10}),
 				StateDefault: types.Int64Value(50),
 			},
 		},
 		{
 			name: "others only, but state_default is 0", caller: caller, want: 0,
-			model: &powerLevelsModel{
+			plan: &powerLevelsModel{
 				Users:        mustMap(t, map[string]int64{"@alice:example.com": 100}),
 				StateDefault: types.Int64Value(0),
 			},
 		},
 		{
-			name: "events override raises the bar", caller: caller, want: 1,
-			model: &powerLevelsModel{
+			name: "events override raises the bar out of a declared reach", caller: caller, want: 1,
+			wantSub: "puts your own account",
+			plan: &powerLevelsModel{
 				Users:  mustMap(t, map[string]int64{caller: 50}),
 				Events: mustMap(t, map[string]int64{"m.room.power_levels": 100}),
 			},
 		},
 		{
 			name: "declared empty users map", caller: caller, want: 1,
-			model: &powerLevelsModel{Users: mustMap(t, map[string]int64{})},
+			wantSub: "does not list your own account",
+			plan:    &powerLevelsModel{Users: mustMap(t, map[string]int64{})},
+		},
+		{
+			// Issue #33, the reachable case: the caller has no entry of its own,
+			// so users_default carries it, and the plan drops users_default
+			// below the bar. The auth rules allow it, because neither the old
+			// nor the new value is above the sender's level.
+			name: "users_default drops the caller below the bar", caller: caller, want: 1,
+			wantSub: "`users_default` leaves your own account",
+			plan: &powerLevelsModel{
+				Users:        types.MapNull(types.Int64Type),
+				UsersDefault: types.Int64Value(0),
+			},
+			prior: &powerLevelsModel{
+				Users:        mustMap(t, map[string]int64{"@alice:example.com": 100}),
+				UsersDefault: types.Int64Value(50),
+			},
+		},
+		{
+			name: "users_default drops but stays above the bar", caller: caller, want: 0,
+			plan: &powerLevelsModel{
+				Users:        types.MapNull(types.Int64Type),
+				UsersDefault: types.Int64Value(50),
+			},
+			prior: &powerLevelsModel{
+				Users:        mustMap(t, map[string]int64{"@alice:example.com": 100}),
+				UsersDefault: types.Int64Value(100),
+			},
+		},
+		{
+			// A raise alone. The homeserver refuses any new value above the
+			// sender's own level, so this apply is rejected, not applied. It is
+			// not a lockout and must not be reported as one.
+			name: "state_default raised above the caller is rejected, not a lockout", caller: caller, want: 0,
+			plan: &powerLevelsModel{
+				Users:        types.MapNull(types.Int64Type),
+				StateDefault: types.Int64Value(100),
+			},
+			prior: callerAt(50),
+		},
+		{
+			name: "events entry raised above the caller is rejected, not a lockout", caller: caller, want: 0,
+			plan: &powerLevelsModel{
+				Users:  types.MapNull(types.Int64Type),
+				Events: mustMap(t, map[string]int64{"m.room.power_levels": 100}),
+			},
+			prior: callerAt(50),
+		},
+		{
+			name: "state_default raised but the caller clears it", caller: caller, want: 0,
+			plan: &powerLevelsModel{
+				Users:        types.MapNull(types.Int64Type),
+				StateDefault: types.Int64Value(100),
+			},
+			prior: callerAt(100),
+		},
+		{
+			// The caller already could not send. This plan is not what locked it
+			// out, and the homeserver refuses the send with a plain error.
+			name: "caller already below the bar", caller: caller, want: 0,
+			plan: &powerLevelsModel{Users: types.MapNull(types.Int64Type)},
+			prior: &powerLevelsModel{
+				Users:        mustMap(t, map[string]int64{caller: 50}),
+				StateDefault: types.Int64Value(100),
+			},
+		},
+		{
+			// Already below the bar, and the plan demotes further. Still not this
+			// plan's doing: the caller could not send before it either.
+			name: "caller already below the bar, and demoted further", caller: caller, want: 0,
+			plan: &powerLevelsModel{Users: mustMap(t, map[string]int64{})},
+			prior: &powerLevelsModel{
+				Users:        mustMap(t, map[string]int64{caller: 50}),
+				StateDefault: types.Int64Value(100),
+			},
+		},
+		{
+			// A create against a room the provider cannot read: no prior, so the
+			// caller's level is unknowable when users is undeclared.
+			name: "no prior state", caller: caller, want: 0,
+			plan: &powerLevelsModel{
+				Users:        types.MapNull(types.Int64Type),
+				StateDefault: types.Int64Value(100),
+			},
 		},
 		{
 			name: "no caller known", caller: "", want: 0,
-			model: &powerLevelsModel{Users: mustMap(t, map[string]int64{})},
+			plan: &powerLevelsModel{Users: mustMap(t, map[string]int64{})},
 		},
-		{name: "nil model", caller: caller, model: nil, want: 0},
+		{name: "nil plan", caller: caller, plan: nil, want: 0},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := powerLevelsSelfLockoutWarnings(c.caller, c.model)
+			got := powerLevelsSelfLockoutWarnings(c.caller, c.plan, c.prior)
 			if len(got) != c.want {
 				t.Fatalf("got %d warnings, want %d: %v", len(got), c.want, got)
 			}
-			if c.want > 0 && !strings.Contains(got[0], "lock you out") {
+			if c.want == 0 {
+				return
+			}
+			if !strings.Contains(got[0], "lock you out") {
 				t.Errorf("warning should mention lockout; got %q", got[0])
+			}
+			if !strings.Contains(got[0], c.wantSub) {
+				t.Errorf("warning should contain %q; got %q", c.wantSub, got[0])
+			}
+			if !strings.Contains(got[0], "room version 12") {
+				t.Errorf("warning should keep the room version 12 note; got %q", got[0])
+			}
+		})
+	}
+}
+
+// TestCallerLevelIn checks the level lookup against the Matrix auth rules:
+// users[sender], then users_default, then 0.
+func TestCallerLevelIn(t *testing.T) {
+	const caller = "@bot:example.com"
+	cases := []struct {
+		name       string
+		model      *powerLevelsModel
+		want       int64
+		wantListed bool
+	}{
+		{
+			name:  "listed wins over users_default",
+			model: &powerLevelsModel{Users: mustMap(t, map[string]int64{caller: 25}), UsersDefault: types.Int64Value(50)},
+			want:  25, wantListed: true,
+		},
+		{
+			name:  "falls back to users_default",
+			model: &powerLevelsModel{Users: mustMap(t, map[string]int64{"@alice:example.com": 100}), UsersDefault: types.Int64Value(50)},
+			want:  50, wantListed: false,
+		},
+		{
+			name:  "falls back to the spec default of 0",
+			model: &powerLevelsModel{Users: types.MapNull(types.Int64Type), UsersDefault: types.Int64Null()},
+			want:  0, wantListed: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, listed := callerLevelIn(c.model, caller)
+			if got != c.want || listed != c.wantListed {
+				t.Errorf("got (%d, %v), want (%d, %v)", got, listed, c.want, c.wantListed)
 			}
 		})
 	}

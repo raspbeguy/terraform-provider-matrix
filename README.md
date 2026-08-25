@@ -180,6 +180,10 @@ containerized Synapse.
   power levels, and `terraform destroy` does not undo it, because power levels
   cannot be deleted. The provider emits a plan-time warning when it detects a
   likely self-lockout. Add `(data.matrix_whoami.me.user_id) = 100` to `users`.
+  Dropping `users_default` below `state_default` does the same thing whenever
+  your account has no entry of its own in `users`. Raising `state_default` is
+  not a risk on its own: the homeserver refuses any power value above the
+  sender's own level, so that apply fails instead.
   This applies to accounts whose power comes from `users`. In room version 12
   and later, the account that created the room keeps its power whatever
   `users` says.
