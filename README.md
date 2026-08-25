@@ -181,6 +181,12 @@ containerized Synapse.
   `terraform state rm` the resource (drops it from state, leaves the server
   alone) or add `lifecycle { ignore_changes = [membership] }` on the block
   (initial invite still fires, subsequent leaves are ignored).
+- `matrix_room.visibility` is re-read on every refresh, so a directory change
+  made outside Terraform shows as drift. A homeserver may refuse to publish a
+  room, through its `room_list_publication_rules`. The provider warns, and
+  because the directory keeps its own value, every later plan shows the
+  difference. Remove `visibility` from the configuration to accept whatever the
+  homeserver decides.
 - `matrix_space` creates rooms with Element's space power-level defaults
   (`events_default = 100`, `invite = 50`). Override via a
   `matrix_room_power_levels` resource pointing at the space. Fields that

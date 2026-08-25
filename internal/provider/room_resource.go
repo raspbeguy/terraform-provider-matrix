@@ -89,7 +89,7 @@ func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		"visibility": schema.StringAttribute{
 			Optional:      true,
 			Computed:      true,
-			Description:   "Directory visibility: public | private. Updatable after creation. A homeserver may refuse to publish a room, through its room_list_publication_rules, in which case the provider warns and the directory keeps its own value.",
+			Description:   "Directory visibility: public | private. Updatable after creation, and re-read on every refresh, so a change made outside Terraform shows as drift. A homeserver may refuse to publish a room, through its room_list_publication_rules. The provider warns, and because the directory keeps its own value, every later plan shows the difference. Remove `visibility` from the configuration to accept whatever the homeserver decides.",
 			Validators:    []validator.String{oneOfString{"public", "private"}},
 			PlanModifiers: keepStr,
 		},
@@ -208,6 +208,7 @@ func (r *roomResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		}
 		roomID := id.RoomID(state.ID.ValueString())
 		readRoomLikeState(ctx, r.client, roomID, &state.baseRoomModel, &resp.Diagnostics)
+		refreshRoomVisibility(ctx, r.client, roomID, &state.baseRoomModel)
 		if resp.Diagnostics.HasError() {
 			return
 		}
@@ -221,6 +222,7 @@ func (r *roomResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 	roomID := id.RoomID(state.ID.ValueString())
 	readRoomLikeState(ctx, r.client, roomID, &state.baseRoomModel, &resp.Diagnostics)
+	refreshRoomVisibility(ctx, r.client, roomID, &state.baseRoomModel)
 	readRoomOnlyState(ctx, r.client, roomID, &state)
 	if resp.Diagnostics.HasError() {
 		return

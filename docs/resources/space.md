@@ -34,7 +34,7 @@ resource "matrix_space" "example" {
 - `room_alias_name` (String) Localpart of the canonical alias to set at creation. On import, adopted from the room's canonical alias when it is local to this homeserver.
 - `room_version` (String) Room version (e.g. "11"). If unset, reflects the version the homeserver chose. A room's version never changes; an upgrade creates a new room.
 - `topic` (String) Room topic (m.room.topic).
-- `visibility` (String) Directory visibility: public | private. Updatable after creation. A homeserver may refuse to publish a room, through its room_list_publication_rules, in which case the provider warns and the directory keeps its own value.
+- `visibility` (String) Directory visibility: public | private. Updatable after creation, and re-read on every refresh, so a change made outside Terraform shows as drift. A homeserver may refuse to publish a room, through its room_list_publication_rules. The provider warns, and because the directory keeps its own value, every later plan shows the difference. Remove `visibility` from the configuration to accept whatever the homeserver decides.
 
 ### Read-Only
 
