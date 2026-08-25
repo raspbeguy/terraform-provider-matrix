@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
-	github.com/hashicorp/terraform-plugin-log v0.10.0
+	github.com/hashicorp/terraform-plugin-log v0.11.0
 	maunium.net/go/mautrix v0.30.0
 )
 
