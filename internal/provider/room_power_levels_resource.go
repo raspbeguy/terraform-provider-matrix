@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -59,6 +60,7 @@ func (r *powerLevelsResource) Schema(_ context.Context, _ resource.SchemaRequest
 		Description: "Manages the m.room.power_levels state event for a single room. Works on any room-like entity, including spaces — point `room_id` at a matrix_space.id to tune its permissions (e.g. to unlock messages in a space, set `events_default = 0`).\n\n" +
 			"Fields you do not declare keep the value the homeserver already has. The provider reads the current event, overlays the fields you declared, and writes the result back. A declared `users` or `events` map is the exception: it replaces that map completely, so that you can remove an entry.\n\n" +
 			"**Warning: self-lockout risk.** A `users` map that omits the account the provider runs as drops that account to `users_default`. Below `state_default`, the account can no longer change the room's power levels, and `terraform destroy` does not undo it, because power levels cannot be deleted. Add `(data.matrix_whoami.me.user_id) = 100` to `users`.\n\n" +
+			"Dropping `users_default` below `state_default` does the same thing whenever your account has no entry of its own in `users`. Raising `state_default` is not a risk on its own: the homeserver refuses any power value above the sender's own level, so that apply fails instead of locking you out.\n\n" +
 			"This applies to accounts whose power comes from `users`. In room version 12 and later, the account that created the room keeps its power whatever `users` says.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
@@ -337,12 +339,17 @@ func callerUserID(c *Client) string {
 	return string(c.MX.UserID)
 }
 
-// int64Or returns v's value, or fallback when v is null or unknown.
-func int64Or(v types.Int64, fallback int64) int64 {
-	if v.IsNull() || v.IsUnknown() {
-		return fallback
+// firstKnownInt64 returns the first value that is neither null nor unknown, or
+// fallback when there is none. The order expresses the merge in
+// applyPowerLevels: what the plan declares wins over what the room holds today,
+// and the Matrix spec default is the last resort.
+func firstKnownInt64(fallback int64, vals ...types.Int64) int64 {
+	for _, v := range vals {
+		if !v.IsNull() && !v.IsUnknown() {
+			return v.ValueInt64()
+		}
 	}
-	return v.ValueInt64()
+	return fallback
 }
 
 // mapInt64 looks up a known int64 element of a known map.
@@ -361,55 +368,133 @@ func mapInt64(m types.Map, key string) (int64, bool) {
 	return v.ValueInt64(), true
 }
 
+// callerLevelIn returns the level caller holds in m, and whether the users map
+// gives it an entry of its own. Matches the Matrix auth rules: users[sender],
+// then users_default, then 0.
+func callerLevelIn(m *powerLevelsModel, caller string) (int64, bool) {
+	if level, listed := mapInt64(m.Users, caller); listed {
+		return level, true
+	}
+	return firstKnownInt64(0, m.UsersDefault), false
+}
+
+// powerLevelsSendBar returns the level needed to send m.room.power_levels once
+// the plan is applied. A declared events entry wins over state_default, and what
+// the plan declares wins over what the room holds today.
+func powerLevelsSendBar(plan, prior *powerLevelsModel) int64 {
+	if v, ok := mapInt64(plan.Events, event.StatePowerLevels.Type); ok {
+		return v
+	}
+	// A declared events map replaces the map wholesale, so the room's own entry
+	// only survives when the plan leaves events undeclared.
+	if prior != nil && (plan.Events.IsNull() || plan.Events.IsUnknown()) {
+		if v, ok := mapInt64(prior.Events, event.StatePowerLevels.Type); ok {
+			return v
+		}
+	}
+	if prior != nil {
+		return firstKnownInt64(50, plan.StateDefault, prior.StateDefault)
+	}
+	return firstKnownInt64(50, plan.StateDefault)
+}
+
 // powerLevelsSelfLockoutWarnings returns human-readable warnings describing how
 // the plan would leave the provider's own account unable to manage the room, so
 // callers can surface them as plan-time diagnostics. Pure function — no
 // client/network access.
 //
-// Only a declared users map can do this: when users is undeclared the merge in
-// applyPowerLevels keeps whatever entry the homeserver already has. A declared
-// map replaces the map wholesale, so an omitted caller falls back to
-// users_default. Below the level needed to send m.room.power_levels that is
-// irreversible — the account can't raise itself again, and destroy doesn't undo
-// it, because power levels can't be deleted.
+// Two shapes lock the caller out:
 //
-// Unknown plan values fall back to the Matrix spec defaults, which is the
-// conservative reading.
+//   - A declared users map replaces the map wholesale, so a caller the map omits
+//     falls back to users_default.
+//   - A raised state_default, or a raised events["m.room.power_levels"], moves
+//     the bar above the level the caller already holds. The send still passes,
+//     because the homeserver checks it against the old bar. See issue #33.
+//
+// prior is what the room holds today: the prior state on an update, or a read
+// from the homeserver on a create. It is nil when neither is available, and the
+// second shape then cannot be detected.
+//
+// Below the level needed to send m.room.power_levels the result is irreversible.
+// The account can't raise itself again, and destroy doesn't undo it, because
+// power levels can't be deleted.
+//
+// Unknown plan values fall back to prior, then to the Matrix spec defaults,
+// which is the conservative reading.
 //
 // Scope: this is about accounts whose power comes from the users map. From room
 // version 12 a room's creator holds power through m.room.create instead and is
 // absent from the map, so it can't be demoted this way. The room version isn't
 // knowable at plan time, so the warning names that case rather than guessing.
-func powerLevelsSelfLockoutWarnings(caller string, m *powerLevelsModel) []string {
-	if caller == "" || m == nil {
+func powerLevelsSelfLockoutWarnings(caller string, plan, prior *powerLevelsModel) []string {
+	if caller == "" || plan == nil {
 		return nil
 	}
-	if m.Users.IsNull() || m.Users.IsUnknown() {
-		return nil
+
+	// The level the caller holds once the merge in applyPowerLevels has run.
+	var level int64
+	var listed, declared bool
+	switch {
+	case !plan.Users.IsNull() && !plan.Users.IsUnknown():
+		declared = true
+		level, listed = callerLevelIn(plan, caller)
+	case prior != nil:
+		// users undeclared: the merge keeps the map the room already has, but a
+		// declared users_default still replaces the fallback.
+		level, listed = mapInt64(prior.Users, caller)
+		if !listed {
+			level = firstKnownInt64(0, plan.UsersDefault, prior.UsersDefault)
+		}
+	default:
+		return nil // nothing to compare the bar against
 	}
-	level, listed := mapInt64(m.Users, caller)
-	if !listed {
-		level = int64Or(m.UsersDefault, 0)
-	}
-	required := int64Or(m.StateDefault, 50)
-	if v, ok := mapInt64(m.Events, event.StatePowerLevels.Type); ok {
-		required = v
-	}
+
+	required := powerLevelsSendBar(plan, prior)
 	if level >= required {
 		return nil
 	}
-	// From room version 12 the creator's power comes from m.room.create, not
-	// from this map, so the creator cannot be demoted by it. We can't know the
-	// room version at plan time, so say so rather than guess.
-	const creatorNote = " In room version 12 and later the account that created the room keeps its power whatever `users` says, so this does not apply to a room's own creator."
-	if listed {
-		return []string{fmt.Sprintf(
-			"`users` puts your own account %q at level %d. That is below the level %d needed to send m.room.power_levels. Applying this will lock you out of the room's power levels, and only a user at a higher level can undo it.",
-			caller, level, required) + creatorNote}
+
+	if prior != nil {
+		priorLevel, _ := callerLevelIn(prior, caller)
+		if priorLevel < powerLevelsSendBar(prior, nil) {
+			// The caller already cannot send m.room.power_levels. This plan is
+			// not what locked it out, and the homeserver rejects the send with
+			// M_FORBIDDEN, which says so plainly enough.
+			return nil
+		}
+		if level >= priorLevel {
+			// The caller's level did not drop, so the only way to reach here is
+			// a raised bar. The auth rules refuse any new power value above the
+			// sender's own level, so that apply is rejected rather than applied.
+			// A raise alone cannot lock anybody out.
+			return nil
+		}
 	}
-	return []string{fmt.Sprintf(
-		"`users` does not list your own account %q, so it falls back to users_default %d. That is below the level %d needed to send m.room.power_levels. Applying this will lock you out of the room's power levels, and only a user at a higher level can undo it. Add %q to `users` (data.matrix_whoami.me.user_id).",
-		caller, level, required, caller) + creatorNote}
+
+	// From room version 12 the creator's power comes from m.room.create, not
+	// from this map, so the creator cannot be demoted by it. ModifyPlan checks
+	// that before it surfaces a warning, but the check needs a readable room, so
+	// keep saying it here for the cases where the read fails.
+	const creatorNote = " In room version 12 and later the account that created the room keeps its power whatever `users` says, so this does not apply to a room's own creator."
+
+	var reason string
+	switch {
+	case declared && listed:
+		reason = fmt.Sprintf("`users` puts your own account %q at level %d", caller, level)
+	case declared:
+		reason = fmt.Sprintf("`users` does not list your own account %q, so it falls back to users_default %d", caller, level)
+	case !listed:
+		reason = fmt.Sprintf("`users_default` leaves your own account %q at level %d, and `users` gives it no entry of its own", caller, level)
+	default:
+		reason = fmt.Sprintf("your own account %q ends up at level %d", caller, level)
+	}
+	msg := fmt.Sprintf(
+		"%s. That is below the level %d needed to send m.room.power_levels. Applying this will lock you out of the room's power levels, and only a user at a higher level can undo it.",
+		reason, required)
+	if !listed {
+		msg += fmt.Sprintf(" Add %q to `users` (data.matrix_whoami.me.user_id).", caller)
+	}
+	return []string{msg + creatorNote}
 }
 
 // ModifyPlan surfaces self-lockout warnings at plan time, so practitioners see
@@ -424,9 +509,79 @@ func (r *powerLevelsResource) ModifyPlan(ctx context.Context, req resource.Modif
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	for _, w := range powerLevelsSelfLockoutWarnings(callerUserID(r.client), &plan) {
+	caller := callerUserID(r.client)
+	warnings := powerLevelsSelfLockoutWarnings(caller, &plan, r.priorPowerLevels(ctx, req, &plan))
+	if len(warnings) == 0 {
+		return
+	}
+	// Only now, because this costs a request: a room creator with privileged
+	// creator power cannot be demoted through the users map at all.
+	if r.callerHasCreatorPower(ctx, &plan, caller) {
+		return
+	}
+	for _, w := range warnings {
 		resp.Diagnostics.AddWarning("Potential power levels self-lockout", w)
 	}
+}
+
+// callerHasCreatorPower reports whether the caller's power comes from
+// m.room.create rather than from the power levels event. From room version 12 a
+// room's creators hold power that no users map can take away, and the Matrix
+// auth rules skip every power level check for them.
+//
+// Best effort: an unreadable room returns false, which costs a warning that may
+// not apply. The warning text names the same case for that reason.
+func (r *powerLevelsResource) callerHasCreatorPower(ctx context.Context, plan *powerLevelsModel, caller string) bool {
+	if r.client == nil || caller == "" || plan.RoomID.IsNull() || plan.RoomID.IsUnknown() {
+		return false
+	}
+	evt, err := r.client.MX.FullStateEvent(ctx, id.RoomID(plan.RoomID.ValueString()), event.StateCreate, "")
+	if err != nil || evt == nil {
+		return false
+	}
+	create := evt.Content.AsCreate()
+	if create == nil || !create.RoomVersion.PrivilegedRoomCreators() {
+		return false
+	}
+	return evt.Sender == id.UserID(caller) || slices.Contains(create.AdditionalCreators, id.UserID(caller))
+}
+
+// priorPowerLevels returns what the room holds today: the prior state on an
+// update, or a read from the homeserver on a create. Returns nil when neither is
+// available.
+//
+// The create-time read is what lets the check see a resource newly pointed at a
+// room that already exists, which is the reported case in issue #33. It is
+// skipped while the room itself is still being created: room_id is unknown then,
+// and the caller is the room's own creator.
+//
+// Best effort throughout. A failure here costs a warning, and Create surfaces
+// any real error. Nothing here ever touches a planned value, so a homeserver
+// that changes between plan and apply cannot produce an inconsistent plan.
+func (r *powerLevelsResource) priorPowerLevels(ctx context.Context, req resource.ModifyPlanRequest, plan *powerLevelsModel) *powerLevelsModel {
+	var prior powerLevelsModel
+	if !req.State.Raw.IsNull() {
+		if diags := req.State.Get(ctx, &prior); diags.HasError() {
+			return nil
+		}
+		// room_id forces replacement, so on a replace the prior state describes
+		// a different room. Read the planned room instead.
+		if prior.RoomID.Equal(plan.RoomID) {
+			return &prior
+		}
+		prior = powerLevelsModel{}
+	}
+	if r.client == nil || plan.RoomID.IsNull() || plan.RoomID.IsUnknown() {
+		return nil
+	}
+	pl, found, err := fetchPowerLevels(ctx, r.client, id.RoomID(plan.RoomID.ValueString()))
+	if err != nil || !found {
+		return nil
+	}
+	if err := modelFromPowerLevels(ctx, pl, &prior); err != nil {
+		return nil
+	}
+	return &prior
 }
 
 func (r *powerLevelsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
