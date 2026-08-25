@@ -355,13 +355,20 @@ func TestWrongResourceTypeDetail(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // testAccRoomImportConfig declares the create-only attributes that issue #32 is
-// about. visibility is deliberately left out: both create and import take it
-// from the directory, so the two sides agree whatever the homeserver's
+// about. withPreset adds the one attribute that no endpoint reports back, so it
+// is null in state after the room is created.
+//
+// visibility is deliberately left out: both create and import take it from the
+// directory, so the two sides agree whatever the homeserver's
 // room_list_publication_rules do.
 //
 // room_version is pinned because the assertions must not move with the Synapse
 // image, which is unpinned in the acceptance workflow.
-func testAccRoomImportConfig(kind, alias string) string {
+func testAccRoomImportConfig(kind, alias string, withPreset bool) string {
+	preset := ""
+	if withPreset {
+		preset = `  preset = "private_chat"`
+	}
 	return fmt.Sprintf(`
 terraform {
   required_providers {
@@ -374,11 +381,11 @@ provider "matrix" {}
 resource "matrix_%[1]s" "test" {
   name            = "tf-acc-import"
   topic           = "Managed by the acceptance suite"
-  preset          = "private_chat"
   room_version    = "11"
   room_alias_name = %[2]q
+%[3]s
 }
-`, kind, alias)
+`, kind, alias, preset)
 }
 
 func testAccCaptureID(resourceName string, out *string) resource.TestCheckFunc {
@@ -405,17 +412,22 @@ func testAccCheckIDUnchanged(resourceName string, want *string) resource.TestChe
 	}
 }
 
-// importDoesNotReplace is the body of both import tests. matrix_room and
-// matrix_space share one schema builder, so both carried the defect.
+// importDoesNotReplace is the body of both tests. matrix_room and matrix_space
+// share one schema builder, so both carried the defect.
 //
-// preset, is_direct and initial_invites cannot be read from any endpoint, so
-// the import cannot reproduce them and the step after it settles them. That
-// apply is the one that used to destroy the room.
+// Step 2 is the regression test for issue #32. It adds preset to a room that
+// already exists, so the prior state for that attribute is null, which is the
+// same condition an import creates. RequiresReplace used to fire on
+// null -> value and destroy the room. The room ID must survive.
+//
+// Step 4 is the other half: the read path must reproduce everything the
+// homeserver reports, or an imported room diverges from the room it adopted.
+// preset, is_direct and initial_invites have no endpoint at all, so the import
+// cannot reproduce them and they are excluded.
 func importDoesNotReplace(t *testing.T, kind, alias string) {
 	t.Helper()
 	testAccSkipUnlessAcc(t)
 	name := "matrix_" + kind + ".test"
-	config := testAccRoomImportConfig(kind, alias)
 	var roomID string
 
 	resource.Test(t, resource.TestCase{
@@ -423,26 +435,32 @@ func importDoesNotReplace(t *testing.T, kind, alias string) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: config,
-				Check:  testAccCaptureID(name, &roomID),
+				Config: testAccRoomImportConfig(kind, alias, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCaptureID(name, &roomID),
+					// Resolved from the homeserver, not left unknown.
+					resource.TestCheckResourceAttr(name, "room_version", "11"),
+					resource.TestCheckResourceAttr(name, "room_alias_name", alias),
+					// No endpoint reports preset, so it settles as null.
+					resource.TestCheckNoResourceAttr(name, "preset"),
+				),
+			},
+			{
+				Config: testAccRoomImportConfig(kind, alias, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckIDUnchanged(name, &roomID),
+					resource.TestCheckResourceAttr(name, "preset", "private_chat"),
+				),
+			},
+			{
+				Config:   testAccRoomImportConfig(kind, alias, true),
+				PlanOnly: true,
 			},
 			{
 				ResourceName:            name,
 				ImportState:             true,
 				ImportStateVerify:       true,
-				ImportStatePersist:      true,
 				ImportStateVerifyIgnore: []string{"preset", "is_direct", "initial_invites"},
-			},
-			{
-				// Issue #32: this apply used to destroy the imported room and
-				// build a new one, taking every dependent resource with it.
-				Config: config,
-				Check:  testAccCheckIDUnchanged(name, &roomID),
-			},
-			{
-				// And now the config is fully settled.
-				Config:   config,
-				PlanOnly: true,
 			},
 		},
 	})
