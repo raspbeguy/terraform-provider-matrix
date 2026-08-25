@@ -13,6 +13,10 @@ resource "matrix_room_power_levels" "example" {
   # A declared users map replaces the whole map on the homeserver, so always
   # list the account the provider runs as. Leave it out and that account drops
   # to users_default, below state_default, and loses control of the room.
+  #
+  # The exception is a room version 12 room that this same account created. A
+  # creator keeps its power without an entry, and a homeserver rejects any
+  # m.room.power_levels event that lists a creator, so drop the line below.
   users = {
     (data.matrix_whoami.me.user_id) = 100
     "@alice:example.com"            = 100

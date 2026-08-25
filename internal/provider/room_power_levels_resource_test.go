@@ -2,7 +2,9 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -55,137 +57,321 @@ func nothingDeclared() *powerLevelsModel {
 }
 
 // populatedContent is a room whose power levels are far from the spec defaults,
-// the way a real room or a space created by createRoomLike looks.
-func populatedContent() *event.PowerLevelsEventContent {
-	invite, kick, ban, redact, state, notify := 50, 60, 70, 80, 90, 95
-	return &event.PowerLevelsEventContent{
-		Users:           map[id.UserID]int{"@bot:example.com": 100},
-		UsersDefault:    5,
-		Events:          map[string]int{"m.room.name": 50},
-		EventsDefault:   100,
-		InvitePtr:       &invite,
-		KickPtr:         &kick,
-		BanPtr:          &ban,
-		RedactPtr:       &redact,
-		StateDefaultPtr: &state,
-		Notifications:   &event.NotificationPowerLevels{RoomPtr: &notify},
+// the way a real room or a space created by createRoomLike looks. It carries two
+// keys mautrix does not model, which is what issue #37 is about: Synapse writes
+// historical, and real rooms carry m.call.invite.
+func populatedRaw(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{
+		"users": {"@bot:example.com": 100},
+		"users_default": 5,
+		"events": {"m.room.name": 50},
+		"events_default": 100,
+		"invite": 50, "kick": 60, "ban": 70, "redact": 80, "state_default": 90,
+		"notifications": {"room": 95, "org.example.custom": 42},
+		"historical": 100,
+		"m.call.invite": 50
+	}`), &raw); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
+	return raw
 }
 
-// TestApplyModelToPowerLevels_PreservesUndeclaredFields is the regression test
-// for the second defect in issue #29. m.room.power_levels is replaced wholesale
-// by the PUT, so a partial config used to wipe every value it did not mention,
-// including the creating account's own users entry (level 100 -> users_default
-// 0, which is below state_default 50, so the room became unmanageable) and the
-// space defaults set in createRoomLike (events_default 100, invite 50).
-func TestApplyModelToPowerLevels_PreservesUndeclaredFields(t *testing.T) {
-	pl := populatedContent()
+func populatedContent(t *testing.T) *event.PowerLevelsEventContent {
+	t.Helper()
+	pl, err := typedPowerLevels(populatedRaw(t))
+	if err != nil {
+		t.Fatalf("typedPowerLevels: %v", err)
+	}
+	return pl
+}
+
+func rawKey(t *testing.T, raw map[string]json.RawMessage, key string) string {
+	t.Helper()
+	v, ok := raw[key]
+	if !ok {
+		return ""
+	}
+	return string(v)
+}
+
+// sameJSON compares two JSON documents by value. Untouched keys keep whatever
+// bytes the homeserver sent, whitespace included, which is the point of using
+// json.RawMessage; the tests that care about a value must not depend on it.
+func sameJSON(t *testing.T, got, want string) bool {
+	t.Helper()
+	var a, b any
+	if err := json.Unmarshal([]byte(got), &a); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(want), &b); err != nil {
+		t.Fatalf("want is not valid JSON: %s", want)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+// TestApplyModelToRawPowerLevels_PreservesUnmodelledKeys is the regression test
+// for issue #37. event.PowerLevelsEventContent models ten keys, and sendState
+// replaces the whole event, so a typed round trip dropped everything else.
+// Rooms this provider creates carry historical and m.call.invite from the start.
+func TestApplyModelToRawPowerLevels_PreservesUnmodelledKeys(t *testing.T) {
+	raw := populatedRaw(t)
 	m := nothingDeclared()
-	m.UsersDefault = types.Int64Value(20) // the one field the practitioner declared
+	m.EventsDefault = types.Int64Value(25)
 
-	if err := applyModelToPowerLevels(context.Background(), pl, m); err != nil {
-		t.Fatalf("applyModelToPowerLevels: %v", err)
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
 	}
-
-	if got := pl.Users["@bot:example.com"]; got != 100 {
-		t.Errorf("caller's users entry: got %d, want 100 (self-lockout, issue #29)", got)
+	if got := rawKey(t, raw, "historical"); got != "100" {
+		t.Errorf("historical: got %q, want 100 (issue #37)", got)
 	}
-	if pl.EventsDefault != 100 {
-		t.Errorf("events_default: got %d, want 100 (space default)", pl.EventsDefault)
+	if got := rawKey(t, raw, "m.call.invite"); got != "50" {
+		t.Errorf("m.call.invite: got %q, want 50 (issue #37)", got)
 	}
-	if pl.InvitePtr == nil || *pl.InvitePtr != 50 {
-		t.Errorf("invite: got %v, want 50 (space default)", pl.InvitePtr)
-	}
-	if got := pl.Events["m.room.name"]; got != 50 {
-		t.Errorf("events entry: got %d, want 50", got)
-	}
-	if pl.UsersDefault != 20 {
-		t.Errorf("users_default: got %d, want the declared 20", pl.UsersDefault)
+	if got := rawKey(t, raw, "events_default"); got != "25" {
+		t.Errorf("events_default: got %q, want the declared 25", got)
 	}
 }
 
-// TestApplyModelToPowerLevels_SkipsNullAndUnknown checks the overlay writes
-// nothing at all when the practitioner declared nothing.
-func TestApplyModelToPowerLevels_SkipsNullAndUnknown(t *testing.T) {
-	pl := populatedContent()
-	if err := applyModelToPowerLevels(context.Background(), pl, nothingDeclared()); err != nil {
-		t.Fatalf("applyModelToPowerLevels: %v", err)
-	}
+// TestApplyModelToRawPowerLevels_PreservesUndeclaredFields is the regression
+// test for the second defect in issue #29: a partial config used to wipe every
+// value it did not mention, including the creating account's users entry and the
+// space defaults from createRoomLike.
+func TestApplyModelToRawPowerLevels_PreservesUndeclaredFields(t *testing.T) {
+	raw := populatedRaw(t)
+	m := nothingDeclared()
+	m.UsersDefault = types.Int64Value(20)
 
-	want := populatedContent()
-	if pl.UsersDefault != want.UsersDefault || pl.EventsDefault != want.EventsDefault {
-		t.Errorf("defaults changed: got %d/%d", pl.UsersDefault, pl.EventsDefault)
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
 	}
-	for name, pair := range map[string][2]*int{
-		"invite":        {pl.InvitePtr, want.InvitePtr},
-		"kick":          {pl.KickPtr, want.KickPtr},
-		"ban":           {pl.BanPtr, want.BanPtr},
-		"redact":        {pl.RedactPtr, want.RedactPtr},
-		"state_default": {pl.StateDefaultPtr, want.StateDefaultPtr},
+	for key, want := range map[string]string{
+		"users":          `{"@bot:example.com":100}`,
+		"events":         `{"m.room.name":50}`,
+		"events_default": "100",
+		"invite":         "50",
+		"users_default":  "20",
 	} {
-		if pair[0] == nil || pair[1] == nil || *pair[0] != *pair[1] {
-			t.Errorf("%s changed: got %v, want %v", name, pair[0], pair[1])
+		if got := rawKey(t, raw, key); !sameJSON(t, got, want) {
+			t.Errorf("%s: got %s, want %s", key, got, want)
 		}
 	}
-	if len(pl.Users) != 1 || len(pl.Events) != 1 {
-		t.Errorf("maps changed: users=%v events=%v", pl.Users, pl.Events)
+}
+
+// TestApplyModelToRawPowerLevels_SkipsNullAndUnknown checks the overlay writes
+// nothing at all when the practitioner declared nothing.
+func TestApplyModelToRawPowerLevels_SkipsNullAndUnknown(t *testing.T) {
+	raw := populatedRaw(t)
+	before, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	if pl.Notifications == nil || pl.Notifications.RoomPtr == nil || *pl.Notifications.RoomPtr != 95 {
-		t.Errorf("notifications changed: %v", pl.Notifications)
+	if err := applyModelToRawPowerLevels(context.Background(), raw, nothingDeclared()); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
+	}
+	after, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("the event changed:\n before %s\n after  %s", before, after)
 	}
 }
 
-// TestApplyModelToPowerLevels_ZeroIsDeclaredNotSkipped is why the overlay reads
-// the types.Int64 rather than merging two content structs: UsersDefault and
-// EventsDefault are plain ints, so a declared 0 and an undeclared field are
-// indistinguishable once mapped into event.PowerLevelsEventContent.
-func TestApplyModelToPowerLevels_ZeroIsDeclaredNotSkipped(t *testing.T) {
-	pl := populatedContent()
+// TestApplyModelToRawPowerLevels_DefaultZeroIsNotWritten guards the one rule
+// that keeps this change a no-op migration. An absent users_default and a zero
+// mean the same thing, so writing an explicit 0 over an absent key would rewrite
+// the power levels of every managed room for no change in meaning. It would also
+// be auth-checked against the sender's own level, where an absent key is not.
+func TestApplyModelToRawPowerLevels_DefaultZeroIsNotWritten(t *testing.T) {
+	raw := map[string]json.RawMessage{"historical": json.RawMessage("100")}
 	m := nothingDeclared()
 	m.UsersDefault = types.Int64Value(0)
 	m.EventsDefault = types.Int64Value(0)
 
-	if err := applyModelToPowerLevels(context.Background(), pl, m); err != nil {
-		t.Fatalf("applyModelToPowerLevels: %v", err)
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
 	}
-	if pl.UsersDefault != 0 {
-		t.Errorf("users_default: got %d, want the declared 0", pl.UsersDefault)
+	if _, present := raw["users_default"]; present {
+		t.Error("users_default was written over an absent key, want it left absent")
 	}
-	if pl.EventsDefault != 0 {
-		t.Errorf("events_default: got %d, want the declared 0", pl.EventsDefault)
+	if _, present := raw["events_default"]; present {
+		t.Error("events_default was written over an absent key, want it left absent")
+	}
+
+	// A declared zero over an existing non-zero value must still be written.
+	raw = map[string]json.RawMessage{"users_default": json.RawMessage("50")}
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
+	}
+	if got := rawKey(t, raw, "users_default"); got != "0" {
+		t.Errorf("users_default: got %q, want the declared 0", got)
 	}
 }
 
-// TestApplyModelToPowerLevels_DeclaredUsersReplacesMap locks in that a declared
-// map is authoritative. Merging per key instead would make it impossible to
-// remove a user's level — and it is precisely this wholesale replacement that
+// TestApplyModelToRawPowerLevels_ZeroIsDeclaredNotSkipped is why the overlay
+// reads the types.Int64 rather than a decoded struct: a declared 0 and an
+// undeclared field are indistinguishable once mapped through
+// event.PowerLevelsEventContent, whose defaults are plain ints.
+func TestApplyModelToRawPowerLevels_ZeroIsDeclaredNotSkipped(t *testing.T) {
+	raw := populatedRaw(t)
+	m := nothingDeclared()
+	m.StateDefault = types.Int64Value(0)
+
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
+	}
+	if got := rawKey(t, raw, "state_default"); got != "0" {
+		t.Errorf("state_default: got %q, want the declared 0", got)
+	}
+}
+
+// TestApplyModelToRawPowerLevels_DeclaredUsersReplacesMap locks in that a
+// declared map is authoritative. Merging per key would make it impossible to
+// remove a user's level, and it is that wholesale replacement that
 // powerLevelsSelfLockoutWarnings warns about.
-func TestApplyModelToPowerLevels_DeclaredUsersReplacesMap(t *testing.T) {
-	pl := populatedContent()
-	pl.Users["@old:example.com"] = 50
+func TestApplyModelToRawPowerLevels_DeclaredUsersReplacesMap(t *testing.T) {
+	raw := populatedRaw(t)
 	m := nothingDeclared()
 	m.Users = mustMap(t, map[string]int64{"@alice:example.com": 100})
 
-	if err := applyModelToPowerLevels(context.Background(), pl, m); err != nil {
-		t.Fatalf("applyModelToPowerLevels: %v", err)
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
 	}
-	if len(pl.Users) != 1 || pl.Users["@alice:example.com"] != 100 {
-		t.Errorf("declared users must replace the map wholesale, got %v", pl.Users)
+	if got := rawKey(t, raw, "users"); !sameJSON(t, got, `{"@alice:example.com":100}`) {
+		t.Errorf("declared users must replace the map wholesale, got %s", got)
 	}
 }
 
-// TestApplyModelToPowerLevels_DeclaredEmptyMapClears checks that `users = {}`
+// TestApplyModelToRawPowerLevels_DeclaredEmptyMapClears checks that `users = {}`
 // clears the map rather than being treated as undeclared.
-func TestApplyModelToPowerLevels_DeclaredEmptyMapClears(t *testing.T) {
-	pl := populatedContent()
+func TestApplyModelToRawPowerLevels_DeclaredEmptyMapClears(t *testing.T) {
+	raw := populatedRaw(t)
 	m := nothingDeclared()
 	m.Users = mustMap(t, map[string]int64{})
 
-	if err := applyModelToPowerLevels(context.Background(), pl, m); err != nil {
-		t.Fatalf("applyModelToPowerLevels: %v", err)
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
 	}
-	if pl.Users == nil || len(pl.Users) != 0 {
-		t.Errorf("users = {} must clear the map, got %v", pl.Users)
+	if got := rawKey(t, raw, "users"); got != "{}" {
+		t.Errorf("users = {} must clear the map, got %s", got)
+	}
+}
+
+// TestSetNotificationRoom covers the one nested merge. The typed path replaced
+// the whole notifications object, losing any sibling key; room versions before
+// 10 also allow the value to be something that is not an object at all.
+func TestSetNotificationRoom(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing string
+		want     string
+	}{
+		{name: "sibling keys survive", existing: `{"room":50,"org.example.custom":42}`, want: `{"org.example.custom":42,"room":75}`}, //nolint:lll
+		{name: "absent object is created", existing: "", want: `{"room":75}`},
+		{name: "null is replaced", existing: "null", want: `{"room":75}`},
+		{name: "a non-object is replaced", existing: "50", want: `{"room":75}`},
+		{name: "an array is replaced", existing: "[1,2]", want: `{"room":75}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw := map[string]json.RawMessage{}
+			if c.existing != "" {
+				raw["notifications"] = json.RawMessage(c.existing)
+			}
+			setNotificationRoom(raw, 75)
+			if got := rawKey(t, raw, "notifications"); !sameJSON(t, got, c.want) {
+				t.Errorf("got %s, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+// TestApplyModelToRawPowerLevels_NilMapDoesNotPanic guards the 404 path. getState
+// leaves out untouched when the event is absent, and a JSON null body makes
+// encoding/json zero the destination. Writing to a nil map panics, which would
+// take the whole provider process down, so the overlay refuses one.
+//
+// fetchPowerLevels is the primary guard and always returns a non-nil map. It
+// needs a live client, so this covers the second line of defence.
+func TestApplyModelToRawPowerLevels_NilMapDoesNotPanic(t *testing.T) {
+	m := nothingDeclared()
+	m.StateDefault = types.Int64Value(50)
+
+	var nilMap map[string]json.RawMessage
+	if err := applyModelToRawPowerLevels(context.Background(), nilMap, m); err == nil {
+		t.Error("want an error for a nil map, not a panic and not a silent no-op")
+	}
+
+	// The empty map fetchPowerLevels guarantees works normally.
+	raw := map[string]json.RawMessage{}
+	if err := applyModelToRawPowerLevels(context.Background(), raw, m); err != nil {
+		t.Fatalf("applyModelToRawPowerLevels: %v", err)
+	}
+	if got := rawKey(t, raw, "state_default"); got != "50" {
+		t.Errorf("state_default: got %q, want 50", got)
+	}
+}
+
+// TestTypedPowerLevels covers the decode that the model mapping needs, including
+// the contents room versions before 10 allow and this cannot represent.
+func TestTypedPowerLevels(t *testing.T) {
+	pl, err := typedPowerLevels(populatedRaw(t))
+	if err != nil {
+		t.Fatalf("typedPowerLevels: %v", err)
+	}
+	if pl == nil {
+		t.Fatal("typedPowerLevels returned a nil struct with no error")
+	}
+	if pl.UsersDefault != 5 || pl.Users["@bot:example.com"] != 100 {
+		t.Errorf("round trip lost values: %+v", pl)
+	}
+	if pl.Notifications == nil || pl.Notifications.RoomPtr == nil || *pl.Notifications.RoomPtr != 95 {
+		t.Errorf("notifications.room did not round trip: %+v", pl.Notifications)
+	}
+
+	// A string power level is legal before room version 10 and cannot decode.
+	bad := map[string]json.RawMessage{"users_default": json.RawMessage(`"50"`)}
+	if _, err := typedPowerLevels(bad); err == nil {
+		t.Error("want an error for a string power level")
+	} else if !strings.Contains(err.Error(), "room versions before 10") {
+		t.Errorf("the error should name the room version; got %q", err)
+	}
+
+	// An empty object is a valid room with everything at its spec default.
+	if pl, err := typedPowerLevels(map[string]json.RawMessage{}); err != nil || pl == nil {
+		t.Errorf("empty object: pl=%v err=%v", pl, err)
+	}
+}
+
+// TestCreatorsInUsers guards the room version 12 check. A homeserver rejects any
+// m.room.power_levels event that lists a room creator, so a config that does so
+// can never apply. The provider used to recommend exactly that.
+func TestCreatorsInUsers(t *testing.T) {
+	const creator = "@bot:example.com"
+	creators := []id.UserID{creator, "@second:example.com"}
+	cases := []struct {
+		name  string
+		users types.Map
+		want  int
+	}{
+		{name: "creator listed", users: mustMap(t, map[string]int64{creator: 100}), want: 1},
+		{name: "both creators listed", users: mustMap(t, map[string]int64{creator: 100, "@second:example.com": 100}), want: 2},
+		{name: "only others listed", users: mustMap(t, map[string]int64{"@alice:example.com": 100}), want: 0},
+		{name: "empty map", users: mustMap(t, map[string]int64{}), want: 0},
+		{name: "undeclared", users: types.MapNull(types.Int64Type), want: 0},
+		{name: "unknown", users: types.MapUnknown(types.Int64Type), want: 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := creatorsInUsers(c.users, creators); len(got) != c.want {
+				t.Errorf("got %v, want %d entries", got, c.want)
+			}
+		})
+	}
+	if got := creatorsInUsers(mustMap(t, map[string]int64{creator: 100}), nil); len(got) != 0 {
+		t.Errorf("no creators means no findings; got %v", got)
 	}
 }
 
@@ -207,7 +393,7 @@ func TestResolveUnknownPowerLevels_FillsEveryUnknown(t *testing.T) {
 		Events:        types.MapUnknown(types.Int64Type),
 		NotifyRoom:    types.Int64Unknown(),
 	}
-	if err := resolveUnknownPowerLevels(context.Background(), populatedContent(), m); err != nil {
+	if err := resolveUnknownPowerLevels(context.Background(), populatedContent(t), m); err != nil {
 		t.Fatalf("resolveUnknownPowerLevels: %v", err)
 	}
 
@@ -235,7 +421,7 @@ func TestResolveUnknownPowerLevels_KeepsKnownPlanValues(t *testing.T) {
 	m.NotifyRoom = types.Int64Null()
 	m.Events = types.MapNull(types.Int64Type)
 
-	if err := resolveUnknownPowerLevels(context.Background(), populatedContent(), m); err != nil {
+	if err := resolveUnknownPowerLevels(context.Background(), populatedContent(t), m); err != nil {
 		t.Fatalf("resolveUnknownPowerLevels: %v", err)
 	}
 	if m.UsersDefault.ValueInt64() != 7 {
@@ -256,7 +442,7 @@ func TestResolveUnknownPowerLevels_DoesNotTouchIDs(t *testing.T) {
 	m.ID = types.StringValue("!room:example.com")
 	m.RoomID = types.StringValue("!room:example.com")
 
-	if err := resolveUnknownPowerLevels(context.Background(), populatedContent(), m); err != nil {
+	if err := resolveUnknownPowerLevels(context.Background(), populatedContent(t), m); err != nil {
 		t.Fatalf("resolveUnknownPowerLevels: %v", err)
 	}
 	if m.ID.ValueString() != "!room:example.com" || m.RoomID.ValueString() != "!room:example.com" {
@@ -309,7 +495,7 @@ func TestModelFromPowerLevels_PreservesDeclaredEmptyMaps(t *testing.T) {
 // TestModelFromPowerLevels_PopulatesMaps is the ordinary refresh path.
 func TestModelFromPowerLevels_PopulatesMaps(t *testing.T) {
 	var m powerLevelsModel
-	if err := modelFromPowerLevels(context.Background(), populatedContent(), &m); err != nil {
+	if err := modelFromPowerLevels(context.Background(), populatedContent(t), &m); err != nil {
 		t.Fatalf("modelFromPowerLevels: %v", err)
 	}
 	users := map[string]int64{}
@@ -639,12 +825,16 @@ func testAccCheckServerUserLevel(t *testing.T, roomResourceName, userID string, 
 		if !ok {
 			return fmt.Errorf("resource %s not found in state", roomResourceName)
 		}
-		pl, found, err := fetchPowerLevels(context.Background(), testAccClient(t), id.RoomID(rs.Primary.ID))
+		raw, found, err := fetchPowerLevels(context.Background(), testAccClient(t), id.RoomID(rs.Primary.ID))
 		if err != nil {
 			return fmt.Errorf("read power levels: %w", err)
 		}
 		if !found {
 			return fmt.Errorf("room %s has no m.room.power_levels", rs.Primary.ID)
+		}
+		pl, err := typedPowerLevels(raw)
+		if err != nil {
+			return fmt.Errorf("decode power levels: %w", err)
 		}
 		got, listed := pl.Users[id.UserID(userID)]
 		if !listed {
@@ -652,6 +842,56 @@ func testAccCheckServerUserLevel(t *testing.T, roomResourceName, userID string, 
 		}
 		if got != want {
 			return fmt.Errorf("server-side level for %s: got %d, want %d (issue #29)", userID, got, want)
+		}
+		return nil
+	}
+}
+
+// testAccSeedRawPowerLevelsKey adds one key to a room's m.room.power_levels
+// through a raw client, so a test does not depend on the homeserver writing it.
+// The CI Synapse may not write "historical", and a test that assumed it would be
+// silently vacuous.
+func testAccSeedRawPowerLevelsKey(t *testing.T, roomResourceName, key, value string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[roomResourceName]
+		if !ok {
+			return fmt.Errorf("resource %s not found in state", roomResourceName)
+		}
+		c := testAccClient(t)
+		roomID := id.RoomID(rs.Primary.ID)
+		raw, _, err := fetchPowerLevels(context.Background(), c, roomID)
+		if err != nil {
+			return fmt.Errorf("read power levels: %w", err)
+		}
+		raw[key] = json.RawMessage(value)
+		if err := sendState(context.Background(), c, roomID, event.StatePowerLevels, "", raw); err != nil {
+			return fmt.Errorf("seed %s: %w", key, err)
+		}
+		return nil
+	}
+}
+
+// testAccCheckServerRawKey asserts on the raw event, not the typed struct that
+// caused issue #37, so the assertion cannot share the bug's blind spot.
+func testAccCheckServerRawKey(t *testing.T, roomResourceName, key, want string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[roomResourceName]
+		if !ok {
+			return fmt.Errorf("resource %s not found in state", roomResourceName)
+		}
+		raw, found, err := fetchPowerLevels(context.Background(), testAccClient(t), id.RoomID(rs.Primary.ID))
+		if err != nil {
+			return fmt.Errorf("read power levels: %w", err)
+		}
+		if !found {
+			return fmt.Errorf("room %s has no m.room.power_levels", rs.Primary.ID)
+		}
+		got, present := raw[key]
+		if !present {
+			return fmt.Errorf("a write dropped %q from m.room.power_levels; it holds %v (issue #37)", key, raw)
+		}
+		if string(got) != want {
+			return fmt.Errorf("%s: got %s, want %s", key, got, want)
 		}
 		return nil
 	}
@@ -687,6 +927,13 @@ func TestAccRoomPowerLevels_PartialConfig(t *testing.T) {
 				},
 				Check: testAccCheckServerUserLevel(t, "matrix_room.test", caller, 100),
 			},
+			// Issue #37: seed a key mautrix does not model, so the next apply has
+			// something to lose. Seeded rather than trusted, because the CI
+			// Synapse may not write "historical" by itself.
+			{
+				Config: testAccPowerLevelsConfig("room", "25"),
+				Check:  testAccSeedRawPowerLevelsKey(t, "matrix_room.test", "historical", "100"),
+			},
 			// The same config must plan clean after a refresh: no perpetual drift.
 			{Config: testAccPowerLevelsConfig("room", "25"), PlanOnly: true},
 			// An update must not clobber the untouched fields either. 0 also
@@ -697,7 +944,13 @@ func TestAccRoomPowerLevels_PartialConfig(t *testing.T) {
 					statecheck.ExpectKnownValue(name, tfjsonpath.New("events_default"), knownvalue.Int64Exact(0)),
 					statecheck.ExpectKnownValue(name, tfjsonpath.New("users").AtMapKey(caller), knownvalue.Int64Exact(100)),
 				},
-				Check: testAccCheckServerUserLevel(t, "matrix_room.test", caller, 100),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckServerUserLevel(t, "matrix_room.test", caller, 100),
+					// Issue #37: a write used to drop every key mautrix does not
+					// model. This apply changed events_default; historical must
+					// still be there.
+					testAccCheckServerRawKey(t, "matrix_room.test", "historical", "100"),
+				),
 			},
 			// id equals room_id, so the default import id needs no IdFunc.
 			{ResourceName: name, ImportState: true, ImportStateVerify: true},

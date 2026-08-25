@@ -186,7 +186,8 @@ containerized Synapse.
   `matrix_room_power_levels` resource pointing at the space. Fields that
   resource does not declare keep the space defaults.
 - `matrix_room_power_levels` declares fields, not the whole event. Fields you
-  leave out keep whatever value the homeserver already has. A declared `users`
+  leave out keep whatever value the homeserver already has, including keys this
+  provider does not model, such as Synapse's `historical`. A declared `users`
   or `events` map is the exception: it replaces that map completely, so that
   you can remove an entry.
 - `matrix_room_power_levels` can irreversibly lock the provider's own account
@@ -195,6 +196,10 @@ containerized Synapse.
   power levels, and `terraform destroy` does not undo it, because power levels
   cannot be deleted. The provider emits a plan-time warning when it detects a
   likely self-lockout. Add `(data.matrix_whoami.me.user_id) = 100` to `users`.
+  In room version 12 and later, a room's creator must **not** appear in `users`
+  at all: a homeserver rejects any `m.room.power_levels` event that lists one,
+  and the creator keeps its power without an entry. The provider reports that at
+  plan time.
   Dropping `users_default` below `state_default` does the same thing whenever
   your account has no entry of its own in `users`. Raising `state_default` is
   not a risk on its own: the homeserver refuses any power value above the
