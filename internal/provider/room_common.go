@@ -132,7 +132,7 @@ func createRoomLike(ctx context.Context, c *Client, m *baseRoomModel, encryption
 		if got, found, err := getRoomVisibility(ctx, c, resp.RoomID); err == nil && found && got != want {
 			diags.AddWarning("Directory visibility not honoured",
 				"The homeserver reports "+string(resp.RoomID)+" as "+got+", not the requested "+want+
-					". Its room_list_publication_rules may forbid publishing this room."+
+					". Synapse denies room directory publication by default, through its room_list_publication_rules, so this is the usual outcome rather than a misconfiguration."+
 					" Every later plan will show this difference, because a refresh reads the directory."+
 					visibilityCure)
 		}
@@ -181,13 +181,13 @@ func syncMutableStateFromModel(ctx context.Context, c *Client, roomID id.RoomID,
 		if err := setRoomVisibility(ctx, c, roomID, want); err != nil {
 			diags.AddWarning("Failed to set directory visibility",
 				"The homeserver refused to set the directory visibility of "+string(roomID)+" to "+want+
-					": "+err.Error()+". Its room_list_publication_rules may forbid it."+
+					": "+err.Error()+". Synapse denies room directory publication by default, through its room_list_publication_rules, so this is the usual outcome rather than a misconfiguration."+
 					" Every later plan will show this difference, because a refresh reads the directory."+
 					visibilityCure)
 		} else if got, found, err := getRoomVisibility(ctx, c, roomID); err == nil && found && got != want {
 			diags.AddWarning("Directory visibility not honoured",
 				"The homeserver reports "+string(roomID)+" as "+got+" after it was set to "+want+
-					". Its room_list_publication_rules may forbid it."+
+					". Synapse denies room directory publication by default, through its room_list_publication_rules, so this is the usual outcome rather than a misconfiguration."+
 					" Every later plan will show this difference, because a refresh reads the directory."+
 					visibilityCure)
 		}
@@ -341,7 +341,7 @@ func readCreateOnlyState(ctx context.Context, c *Client, roomID id.RoomID, m *ba
 // visibilityCure is appended to every directory warning. Without it a
 // practitioner is told what went wrong and not what to do about the diff that
 // now follows every plan.
-const visibilityCure = " Remove `visibility` from the configuration to accept whatever the homeserver decides, and plans go clean again."
+const visibilityCure = " Remove `visibility` from the configuration to accept whatever the homeserver decides, and plans go clean again. Declare it only against a homeserver that is known to allow publication."
 
 // refreshRoomVisibility re-reads the public room directory into m, whatever the
 // model already holds.

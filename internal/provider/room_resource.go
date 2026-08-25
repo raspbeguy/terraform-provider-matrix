@@ -89,7 +89,7 @@ func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		"visibility": schema.StringAttribute{
 			Optional:      true,
 			Computed:      true,
-			Description:   "Directory visibility: public | private. Updatable after creation, and re-read on every refresh, so a change made outside Terraform shows as drift. A homeserver may refuse to publish a room, through its room_list_publication_rules. The provider warns, and because the directory keeps its own value, every later plan shows the difference. Remove `visibility` from the configuration to accept whatever the homeserver decides.",
+			Description:   "Directory visibility: public | private. Updatable after creation, and re-read on every refresh, so a change made outside Terraform shows as drift. Synapse denies room directory publication by default, through its room_list_publication_rules, so a room asked to be `public` commonly stays `private`. The provider warns, and because the directory keeps its own value, every later plan shows the difference. Declare this attribute only against a homeserver known to allow publication; leave it out and the room adopts whatever the homeserver decides.",
 			Validators:    []validator.String{oneOfString{"public", "private"}},
 			PlanModifiers: keepStr,
 		},

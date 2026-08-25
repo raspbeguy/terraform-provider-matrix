@@ -182,11 +182,12 @@ containerized Synapse.
   alone) or add `lifecycle { ignore_changes = [membership] }` on the block
   (initial invite still fires, subsequent leaves are ignored).
 - `matrix_room.visibility` is re-read on every refresh, so a directory change
-  made outside Terraform shows as drift. A homeserver may refuse to publish a
-  room, through its `room_list_publication_rules`. The provider warns, and
-  because the directory keeps its own value, every later plan shows the
-  difference. Remove `visibility` from the configuration to accept whatever the
-  homeserver decides.
+  made outside Terraform shows as drift. Synapse denies room directory
+  publication by default, through its `room_list_publication_rules`, so a room
+  asked to be `public` commonly stays `private`. The provider warns, and because
+  the directory keeps its own value, every later plan then shows the difference.
+  Declare `visibility` only against a homeserver known to allow publication.
+  Leave it out and the room adopts whatever the homeserver decides.
 - `matrix_space` creates rooms with Element's space power-level defaults
   (`events_default = 100`, `invite = 50`). Override via a
   `matrix_room_power_levels` resource pointing at the space. Fields that
