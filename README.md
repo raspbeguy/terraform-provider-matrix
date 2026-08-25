@@ -123,6 +123,21 @@ the homeserver without recreating it:
 ```bash
 terraform import matrix_room.example '!abcDEF:example.com'
 terraform import matrix_space.team '!xyzGHI:example.com'
+```
+
+For rooms and spaces, a few attributes have no endpoint that reports them back:
+`preset`, `initial_invites`, and `is_direct` on rooms. If your configuration
+sets any of them, the first plan after the import shows an in-place update. That
+apply changes nothing on the homeserver. It records the declared values, and
+every later plan is clean. Everything else, including `room_version`,
+`visibility`, `room_alias_name` and `encryption_enabled`, is read back during
+the import.
+
+A space is a room whose `creation_content.type` is `m.space`, so both take the
+same kind of ID. The provider checks the type and refuses an import into the
+wrong resource.
+
+```bash
 terraform import matrix_space_child.general '!xyzGHI:example.com|!abcDEF:example.com'
 terraform import matrix_room_member.alice '!abcDEF:example.com|@alice:example.com'
 terraform import matrix_room_power_levels.general '!abcDEF:example.com'

@@ -6,11 +6,14 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -36,12 +39,36 @@ func (r *roomResource) Metadata(_ context.Context, req resource.MetadataRequest,
 	}
 }
 
+// replaceIfWasKnownStr forces replacement only when the prior state holds a
+// value. RequiresReplace fires on null -> value too, and after an import every
+// unread attribute is null, so a configured value would destroy the room the
+// import was meant to adopt. See issue #32.
+//
+// The framework already skips create, destroy, and the no-change case before it
+// calls this, so only a known-to-known change reaches it.
+func replaceIfWasKnownStr() planmodifier.String {
+	const desc = "Forces replacement when the value changes, but not when the prior state is null."
+	return stringplanmodifier.RequiresReplaceIf(
+		func(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+			resp.RequiresReplace = !req.StateValue.IsNull()
+		}, desc, desc)
+}
+
 func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	desc := "A Matrix room."
 	if r.isSpace {
 		desc = "A Matrix space (a room with `creation_content.type = m.space`). At creation, applies Element-style defaults that lock messages to admins (`events_default = 100`) and let moderators invite (`invite = 50`), atomically with the /createRoom call. Override or relax these via a `matrix_room_power_levels` resource pointing at this space."
 	}
-	forceNewStr := []planmodifier.String{stringplanmodifier.RequiresReplace()}
+	// Create-only attributes are Optional+Computed so that Read can populate
+	// them without a config that omits them diffing forever, and they force
+	// replacement only from a known prior value. A null prior state means an
+	// import, or an attribute added to the config of a room that already exists,
+	// and replacing there destroys the room the import was meant to adopt.
+	// See issue #32.
+	createOnlyStr := []planmodifier.String{replaceIfWasKnownStr(), stringplanmodifier.UseStateForUnknown()}
+	keepStr := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
+	keepBool := []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}
+	keepSet := []planmodifier.Set{setplanmodifier.UseStateForUnknown()}
 
 	attrs := map[string]schema.Attribute{
 		"id": schema.StringAttribute{
@@ -54,13 +81,17 @@ func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		"avatar_url": schema.StringAttribute{Optional: true, Description: "Avatar mxc:// URI (m.room.avatar)."},
 		"preset": schema.StringAttribute{
 			Optional:      true,
-			Description:   "Creation preset: private_chat | trusted_private_chat | public_chat.",
-			PlanModifiers: forceNewStr,
+			Computed:      true,
+			Description:   "Creation preset: private_chat | trusted_private_chat | public_chat. Applies at creation only, and no endpoint reports it back, so an imported room records it on the first apply.",
+			Validators:    []validator.String{oneOfString{"private_chat", "trusted_private_chat", "public_chat"}},
+			PlanModifiers: createOnlyStr,
 		},
 		"visibility": schema.StringAttribute{
 			Optional:      true,
-			Description:   "Directory visibility: public | private.",
-			PlanModifiers: forceNewStr,
+			Computed:      true,
+			Description:   "Directory visibility: public | private. Updatable after creation. A homeserver may refuse to publish a room, through its room_list_publication_rules, in which case the provider warns and the directory keeps its own value.",
+			Validators:    []validator.String{oneOfString{"public", "private"}},
+			PlanModifiers: keepStr,
 		},
 		"history_visibility": schema.StringAttribute{
 			Optional:    true,
@@ -73,18 +104,22 @@ func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		},
 		"room_version": schema.StringAttribute{
 			Optional:      true,
-			Description:   "Room version (e.g. \"11\").",
-			PlanModifiers: forceNewStr,
+			Computed:      true,
+			Description:   "Room version (e.g. \"11\"). If unset, reflects the version the homeserver chose. A room's version never changes; an upgrade creates a new room.",
+			PlanModifiers: createOnlyStr,
 		},
 		"room_alias_name": schema.StringAttribute{
 			Optional:      true,
-			Description:   "Localpart of the canonical alias to set at creation.",
-			PlanModifiers: forceNewStr,
+			Computed:      true,
+			Description:   "Localpart of the canonical alias to set at creation. On import, adopted from the room's canonical alias when it is local to this homeserver.",
+			PlanModifiers: createOnlyStr,
 		},
 		"initial_invites": schema.SetAttribute{
-			ElementType: types.StringType,
-			Optional:    true,
-			Description: "User IDs to invite during room creation. Subsequent changes are ignored — use matrix_room_member.",
+			ElementType:   types.StringType,
+			Optional:      true,
+			Computed:      true,
+			Description:   "User IDs to invite during room creation. Subsequent changes are ignored — use matrix_room_member.",
+			PlanModifiers: keepSet,
 		},
 		"canonical_alias": schema.StringAttribute{
 			Computed:    true,
@@ -96,13 +131,15 @@ func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 	if !r.isSpace {
 		attrs["encryption_enabled"] = schema.BoolAttribute{
 			Optional:      true,
-			Description:   "If true, enable end-to-end encryption at creation time. Cannot be disabled once set.",
-			PlanModifiers: []planmodifier.Bool{},
+			Computed:      true,
+			Description:   "If true, enable end-to-end encryption at creation time. Cannot be disabled once set. On import, adopted from m.room.encryption.",
+			PlanModifiers: keepBool,
 		}
 		attrs["is_direct"] = schema.BoolAttribute{
 			Optional:      true,
-			Description:   "Mark the room as a direct chat.",
-			PlanModifiers: []planmodifier.Bool{},
+			Computed:      true,
+			Description:   "Mark the room as a direct chat. Applies at creation only, and no endpoint reports it back, so an imported room records it on the first apply.",
+			PlanModifiers: keepBool,
 		}
 	}
 
@@ -149,6 +186,7 @@ func (r *roomResource) Create(ctx context.Context, req resource.CreateRequest, r
 	}
 	plan.ID = types.StringValue(string(roomID))
 	readRoomLikeState(ctx, r.client, roomID, &plan.baseRoomModel, &resp.Diagnostics)
+	readRoomOnlyState(ctx, r.client, roomID, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -174,6 +212,7 @@ func (r *roomResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 	roomID := id.RoomID(state.ID.ValueString())
 	readRoomLikeState(ctx, r.client, roomID, &state.baseRoomModel, &resp.Diagnostics)
+	readRoomOnlyState(ctx, r.client, roomID, &state)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -211,6 +250,7 @@ func (r *roomResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 	readRoomLikeState(ctx, r.client, roomID, &plan.baseRoomModel, &resp.Diagnostics)
+	readRoomOnlyState(ctx, r.client, roomID, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -236,6 +276,39 @@ func (r *roomResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 	}
 }
 
+// wrongResourceTypeDetail reports the mismatch when a room ID is imported into
+// the wrong resource, or "" when the two agree. A space is a room with
+// creation_content.type = m.space, so both resources accept any room ID and
+// would then fight it on every plan.
+func wrongResourceTypeDetail(roomID string, roomType event.RoomType, isSpace bool) string {
+	roomIsSpace := roomType == event.RoomTypeSpace
+	if roomIsSpace == isSpace {
+		return ""
+	}
+	have, want := "matrix_room", "matrix_space"
+	if roomIsSpace {
+		have, want = "matrix_space", "matrix_room"
+	}
+	return roomID + " is a " + have + ", not a " + want + ". Import it as " + have + " instead."
+}
+
 func (r *roomResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	// A space is a room with creation_content.type = m.space, so a bare
+	// passthrough lets either resource adopt either kind and then fight it on
+	// every plan. Check before anything lands in state.
+	create, found, err := getCreateContent(ctx, r.client, id.RoomID(req.ID))
+	switch {
+	case err != nil:
+		resp.Diagnostics.AddError("Failed to read m.room.create", err.Error())
+		return
+	case !found:
+		resp.Diagnostics.AddError("Room not found",
+			"No m.room.create event is readable for "+req.ID+". Check the room ID, and that this account is in the room.")
+		return
+	}
+	if detail := wrongResourceTypeDetail(req.ID, create.Type, r.isSpace); detail != "" {
+		resp.Diagnostics.AddError("Wrong resource type for this room", detail)
+		return
+	}
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
