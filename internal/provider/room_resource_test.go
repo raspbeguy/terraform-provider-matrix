@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -437,6 +438,7 @@ func importDoesNotReplace(t *testing.T, kind, alias string) {
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCleanupAlias(t, alias),
 		Steps: []resource.TestStep{
 			{
 				Config: testAccRoomImportConfig(kind, alias, false),
@@ -470,12 +472,27 @@ func importDoesNotReplace(t *testing.T, kind, alias string) {
 	})
 }
 
+// testAccCleanupAlias removes the local alias a test created, so a persistent
+// homeserver is not left with aliases pointing at rooms nobody is in.
+//
+// Tidying, not asserting: it always returns nil, because a failure here says
+// nothing about the code under test. The rooms themselves cannot be removed with
+// a regular user token. See issue #49.
+func testAccCleanupAlias(t *testing.T, localpart string) resource.TestCheckFunc {
+	return func(*terraform.State) error {
+		c := testAccClient(t)
+		alias := id.NewRoomAlias(localpart, homeserverFromMXID(string(c.MX.UserID)))
+		_, _ = c.MX.DeleteAlias(context.Background(), alias)
+		return nil
+	}
+}
+
 func TestAccRoom_ImportDoesNotReplace(t *testing.T) {
-	importDoesNotReplace(t, "room", "tf-acc-import-room")
+	importDoesNotReplace(t, "room", acctest.RandomWithPrefix("tf-acc-import-room"))
 }
 
 func TestAccSpace_ImportDoesNotReplace(t *testing.T) {
-	importDoesNotReplace(t, "space", "tf-acc-import-space")
+	importDoesNotReplace(t, "space", acctest.RandomWithPrefix("tf-acc-import-space"))
 }
 
 // attrForcesReplace runs an attribute's plan modifiers over a known-to-known
@@ -532,7 +549,15 @@ func testAccSetRoomVisibility(t *testing.T, resourceName, visibility string) res
 		if !ok {
 			return fmt.Errorf("resource %s not found in state", resourceName)
 		}
-		if err := setRoomVisibility(context.Background(), testAccClient(t), id.RoomID(rs.Primary.ID), visibility); err != nil {
+		c, roomID := testAccClient(t), id.RoomID(rs.Primary.ID)
+		// Skip the write when the directory already agrees. A homeserver that
+		// refuses to publish never listed the room, so there is nothing to undo,
+		// and one that policed the endpoint in both directions would fail the
+		// step for no reason. See issue #49.
+		if got, found, err := getRoomVisibility(context.Background(), c, roomID); err == nil && found && got == visibility {
+			return nil
+		}
+		if err := setRoomVisibility(context.Background(), c, roomID, visibility); err != nil {
 			return fmt.Errorf("set directory visibility: %w", err)
 		}
 		return nil
@@ -573,17 +598,30 @@ resource "matrix_room" "test" {
 func TestAccRoom_VisibilityDriftIsDetected(t *testing.T) {
 	testAccSkipUnlessAcc(t)
 	const name = "matrix_room.test"
-	config := testAccRoomVisibilityConfig("tf-acc-visibility-drift")
+	alias := acctest.RandomWithPrefix("tf-acc-visibility")
+	config := testAccRoomVisibilityConfig(alias)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCleanupAlias(t, alias),
 		Steps: []resource.TestStep{
 			{
+				// The state check is the assertion. It holds on both kinds of
+				// homeserver, because the apply records the requested value either
+				// way.
+				//
+				// ExpectNonEmptyPlan because a homeserver that refuses to publish
+				// leaves the directory private, and the fix from #41 then reports
+				// that on the post-apply refresh. That plan is correct, so the step
+				// must tolerate it. Here the flag only tolerates a non-empty plan,
+				// it does not require one, so a permitting homeserver is
+				// unaffected. See issue #49.
 				Config: config,
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(name, tfjsonpath.New("visibility"), knownvalue.StringExact("public")),
 				},
+				ExpectNonEmptyPlan: true,
 			},
 			{
 				// Unpublish behind Terraform's back. A step's Check runs before

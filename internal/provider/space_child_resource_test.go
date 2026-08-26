@@ -172,7 +172,11 @@ func TestSpaceChildMissingVia(t *testing.T) {
 // Acceptance
 // ---------------------------------------------------------------------------
 
-func testAccSpaceChildConfig() string {
+// testAccSpaceChildConfig takes the via server from the caller rather than
+// hardcoding the CI container's name. via is meant to name a server a client can
+// join the child through, so on a real homeserver a literal "localhost" is wrong
+// data. See issue #49.
+func testAccSpaceChildConfig(viaServer string) string {
 	return fmt.Sprintf(`
 terraform {
   required_providers {
@@ -199,7 +203,7 @@ resource "matrix_space_child" "test" {
   child_room_id   = matrix_room.child.id
   via             = [%[1]q]
 }
-`, "localhost")
+`, viaServer)
 }
 
 // TestAccSpaceChild_ImportPlansClean is the regression test for issue #40. The
@@ -209,7 +213,7 @@ resource "matrix_space_child" "test" {
 func TestAccSpaceChild_ImportPlansClean(t *testing.T) {
 	testAccSkipUnlessAcc(t)
 	const name = "matrix_space_child.test"
-	config := testAccSpaceChildConfig()
+	config := testAccSpaceChildConfig(homeserverFromMXID(testAccUserID(t)))
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
