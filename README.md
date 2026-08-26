@@ -183,6 +183,12 @@ whether the homeserver lists rooms in its public directory.
   changes and not refreshed on `terraform refresh`.
 - Membership transitions are idempotent: re-invoking `invite` on someone who's
   already `join` is a no-op (not a forbidden state event).
+- Creating a room is the one request the provider will not retry after an
+  ambiguous failure. `POST /createRoom` carries no transaction id, so a timeout
+  or a gateway error leaves it unknown whether the homeserver made the room, and
+  repeating it can make a second one that nothing surfaces. A rate limit is still
+  retried, because the homeserver refuses that before doing any work. If a create
+  fails, check the homeserver before applying again: a room may exist.
 - A destroy that the homeserver refuses is an error, not a warning. `terraform
   destroy` used to report success over work it never did, so a teardown could
   exit 0 with people still in rooms. The usual cause is power: kicking anyone

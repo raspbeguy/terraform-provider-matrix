@@ -117,9 +117,19 @@ func createRoomLike(ctx context.Context, c *Client, m *baseRoomModel, encryption
 		})
 	}
 
-	resp, err := c.MX.CreateRoom(ctx, req)
+	// The one non-idempotent call this provider makes. /createRoom carries no
+	// transaction id, so a retry after a timeout or a gateway error can make a
+	// second room that nothing ever surfaces. Only a rate limit is repeated,
+	// because the homeserver refused that before doing any work. See issue #51.
+	resp, err := retryOnRateLimit(ctx, matrixHTTPRetries, func(ctx context.Context) (*mautrix.RespCreateRoom, error) {
+		return c.MX.CreateRoom(ctx, req)
+	})
 	if err != nil {
-		diags.AddError("Failed to create room", err.Error())
+		diags.AddError("Failed to create room", err.Error()+
+			"\n\nA room may exist even though this failed. Creating a room cannot be retried "+
+			"safely, because the Matrix specification gives no way to ask a homeserver whether it "+
+			"already did the work, so a timeout or a gateway error leaves the outcome unknown. "+
+			"Check the homeserver before applying again, or a second room will be created.")
 		return ""
 	}
 	// /createRoom carries visibility, but a homeserver is free to ignore it,
