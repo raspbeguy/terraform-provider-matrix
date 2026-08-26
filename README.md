@@ -9,7 +9,7 @@ account. Built on
 and [`mautrix-go`](https://github.com/mautrix/go).
 
 **Community room:** [#terraform-provider-matrix](https://matrix.to/#/!qjThJeWXXNnzmAhSIg:gugod.fr?via=gugod.fr)
-on Matrix — discussion, questions, bug reports. The room itself is managed by
+on Matrix: discussion, questions, bug reports. The room itself is managed by
 this provider (power levels, members, aliases, etc., all declared in HCL).
 
 ## Features
@@ -22,9 +22,9 @@ Resources:
 | `matrix_space` | Create a space (auto-applies Element's power-level defaults) |
 | `matrix_space_child` | Link a room or space under a parent space |
 | `matrix_room_member` | Manage one user's membership (idempotent invite/kick/ban/leave/knock) |
-| `matrix_room_power_levels` | Full `m.room.power_levels` control — works on rooms and spaces |
-| `matrix_room_join_rules` | `m.room.join_rules` — public/invite/knock/restricted, with space-gated `restricted` support |
-| `matrix_room_server_acl` | `m.room.server_acl` — federation allow/deny lists |
+| `matrix_room_power_levels` | Full `m.room.power_levels` control, on rooms and spaces |
+| `matrix_room_join_rules` | `m.room.join_rules`: public, invite, knock or restricted, with space-gated `restricted` support |
+| `matrix_room_server_acl` | `m.room.server_acl`: federation allow and deny lists |
 | `matrix_room_alias` | Directory alias management |
 | `matrix_room_state` | Arbitrary state-event escape hatch |
 | `matrix_user_profile` | Caller's global profile (display name + avatar) |
@@ -44,7 +44,7 @@ terraform {
   required_providers {
     matrix = {
       source  = "raspbeguy/matrix"
-      version = "~> 0.2"
+      version = "~> 0.4"
     }
   }
 }
@@ -64,8 +64,8 @@ All provider settings have environment-variable fallbacks.
 |---|---|---|
 | `homeserver_url` | `MATRIX_HOMESERVER_URL` | yes |
 | `access_token` | `MATRIX_ACCESS_TOKEN` | yes (sensitive) |
-| `user_id` | `MATRIX_USER_ID` | no — inferred from `/whoami` |
-| `request_timeout` | — | no — default `30s` |
+| `user_id` | `MATRIX_USER_ID` | no, inferred from `/whoami` |
+| `request_timeout` | none | no, defaults to `30s` |
 
 Access tokens come from `/login` or, in Element, All settings → Help & About →
 Advanced → Access Token.
@@ -158,7 +158,7 @@ See each resource's docs page for the exact ID format.
 | `make build` | Compile the provider binary |
 | `make install` | Build and drop into `~/.terraform.d/plugins/…` |
 | `make test` | Run unit tests |
-| `make testacc` | Run acceptance tests (`TF_ACC=1`) — needs a live Matrix homeserver; see `ci/compose.synapse.yml` for a disposable one |
+| `make testacc` | Run acceptance tests (`TF_ACC=1`). Needs a live Matrix homeserver. See `ci/compose.synapse.yml` for a disposable one |
 | `make docs` | Regenerate `docs/` via `tfplugindocs` |
 | `make vet` | `go vet ./...` |
 
@@ -169,10 +169,10 @@ is unpinned.
 
 `make testacc` needs a homeserver it may pollute. A persistent one works: the
 aliases each test creates are randomised and cleaned up afterwards, so repeated
-runs do not collide. Each run leaves one room per test behind, because Matrix
+runs do not collide. Each run leaves the rooms it made behind, because Matrix
 has no way to delete a room and destroy only makes the account leave. Purging
-them needs the admin API, plus one extra room per run for a probe that asks
-whether the homeserver lists rooms in its public directory.
+them needs the admin API. One of them is a probe that asks whether the
+homeserver lists rooms in its public directory.
 
 ## Caveats
 
