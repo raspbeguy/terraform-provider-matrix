@@ -91,6 +91,27 @@ func ambiguousErr(err error) bool {
 	return status < 400 || status >= 500
 }
 
+// forbiddenErr reports whether err is a homeserver refusing to show something,
+// rather than a failure to reach it.
+//
+// The two are worth telling apart wherever an absent value is a legitimate
+// answer. Synapse refuses a state read from someone who is not in the room with
+// AuthError(403), which defaults to M_FORBIDDEN, in
+// check_user_in_room_or_world_readable. See issue #60.
+//
+// Errcode or status, the same two-source shape notFoundErr uses, because neither
+// alone is reliable across homeservers.
+func forbiddenErr(err error) bool {
+	var httpErr mautrix.HTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	if httpErr.RespError != nil && httpErr.RespError.ErrCode == "M_FORBIDDEN" {
+		return true
+	}
+	return httpErr.Response != nil && httpErr.Response.StatusCode == http.StatusForbidden
+}
+
 // rateLimitFallback is the wait used when a homeserver says it is rate limiting
 // but gives no hint about how long. rateLimitCap bounds the wait, so a broken or
 // hostile Retry-After cannot hang an apply.
