@@ -3,9 +3,10 @@ package provider
 import (
 	"context"
 	"fmt"
-	"path"
+	"net"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	fwpath "github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -44,7 +45,8 @@ func (r *serverACLResource) Metadata(_ context.Context, req resource.MetadataReq
 func (r *serverACLResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Manages the m.room.server_acl state event for a room or space. Lets you block specific homeservers from federating events into the room.\n\n" +
-			"**Warning — self-lockout risk.** A misconfigured ACL can permanently lock the caller's homeserver (and therefore the caller) out of the room: once the ACL blocks your server, you cannot send further events — including a corrective ACL. Recovery requires a homeserver admin to intervene. Before applying: make sure `allow` either contains your homeserver (or `\"*\"`) and `deny` does not match it. This provider emits a plan-time warning if it detects a likely self-lockout, but the final responsibility is yours.",
+			"**Warning: a bad ACL cannot be undone.** A homeserver applies this event to the events that arrive from other servers. If the ACL blocks your own server, every remote server rejects this room's events from you, and rejects a corrective ACL too. Your own server still accepts your events, so local users see no change while federation stays broken for good.\n\n" +
+			"Before you apply, make sure that `allow` contains your homeserver or `\"*\"`, and that `deny` does not match it. This provider warns at plan time when it detects a likely self-lockout, and refuses a plan that denies every server.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -59,12 +61,14 @@ func (r *serverACLResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"allow": schema.SetAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Allow-list of homeserver globs (e.g. [\"*\"], or [\"matrix.org\", \"*.example.com\"]). If empty or unset, defaults to allowing all.",
+				Description: "Allow-list of homeserver globs, for example [\"*\"] or [\"matrix.org\", \"*.example.com\"].\n\n" +
+					"An empty or unset list denies every server, your own included, so use [\"*\"] to allow all. This provider refuses such a plan.\n\n" +
+					"Matching uses the glob the Matrix specification defines: `*` matches zero or more characters, `?` matches exactly one, every other character is literal, and case is ignored.",
 			},
 			"deny": schema.SetAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Deny-list of homeserver globs. Evaluated before allow.",
+				Description: "Deny-list of homeserver globs. A homeserver checks this list before allow, so a name that both lists match is denied.",
 			},
 			"allow_ip_literals": schema.BoolAttribute{
 				Optional:    true,
@@ -100,21 +104,36 @@ func buildServerACLContent(ctx context.Context, m *serverACLModel) (*event.Serve
 	return c, nil
 }
 
-// serverACLSelfLockoutWarnings returns human-readable warnings describing how the
-// given ACL would lock the caller's homeserver out of the room, so callers can
-// surface them as plan-time diagnostics. Pure function — no client/network access.
+// aclLockoutConsequence says what an ACL that blocks your own server costs. A
+// homeserver applies this event only to what arrives from other servers, so your
+// own server keeps accepting your events. See federation_server.py, where every
+// check runs against the origin of an inbound request.
+const aclLockoutConsequence = " Applying this ACL blocks your own server: every remote server " +
+	"rejects this room's events from you after that, and rejects a corrective ACL too, so the " +
+	"room never federates again."
+
+// serverACLSelfLockoutWarnings returns readable warnings that describe how the
+// given ACL blocks the caller's own homeserver, so a caller can surface them as
+// plan-time diagnostics. Pure function, with no client or network access.
 //
-// Pattern matching uses path.Match (which supports * and ? globs and is what the
-// Matrix spec's informal "shell glob" semantics boil down to in practice).
+// Matching follows globMatchHomeserver, which implements the specification's
+// glob rather than path.Match. See issue #61.
 func serverACLSelfLockoutWarnings(homeserver string, c *event.ServerACLEventContent) []string {
 	if homeserver == "" || c == nil {
 		return nil
 	}
 	var out []string
+	// Synapse rejects a bracketed name, or one that parses as IPv4, before it
+	// looks at either list. So this flag is a lockout route of its own.
+	if !c.AllowIPLiterals && isIPLiteral(homeserver) {
+		out = append(out, fmt.Sprintf(
+			"allow_ip_literals is false and your own homeserver %q is an IP literal."+aclLockoutConsequence,
+			homeserver))
+	}
 	for _, pattern := range c.Deny {
 		if globMatchHomeserver(pattern, homeserver) {
 			out = append(out, fmt.Sprintf(
-				"deny entry %q matches your own homeserver %q — applying this ACL will lock you out of the room, and only a homeserver admin can undo it.",
+				"deny entry %q matches your own homeserver %q."+aclLockoutConsequence,
 				pattern, homeserver))
 		}
 	}
@@ -128,40 +147,102 @@ func serverACLSelfLockoutWarnings(homeserver string, c *event.ServerACLEventCont
 		}
 		if !matched {
 			out = append(out, fmt.Sprintf(
-				"allow list does not match your own homeserver %q — applying this ACL will lock you out of the room, and only a homeserver admin can undo it. Add %q (or %q) to allow.",
+				"allow list does not match your own homeserver %q."+aclLockoutConsequence+
+					" Add %q or %q to allow.",
 				homeserver, homeserver, "*"))
 		}
 	}
 	return out
 }
 
+// globMatchHomeserver reports whether pattern matches server under the glob the
+// Matrix specification defines for m.room.server_acl. "*" matches zero or more
+// characters, "?" matches exactly one, and every other character is literal.
+//
+// This used to call path.Match, which is a different language. Synapse builds
+// its matcher with glob_to_regex in rust/src/push/utils.rs, which regex-escapes
+// every run between wildcards and compiles the result case-insensitively. So
+// there is no character class, there is no malformed pattern, and the match
+// ignores case. path.Match agreed with none of that, which hid real lockouts
+// and invented false ones. See issue #61.
+//
+// A server name is ASCII by grammar, so a comparison of bytes after lowering is
+// safe here.
 func globMatchHomeserver(pattern, server string) bool {
-	ok, err := path.Match(pattern, server)
-	return err == nil && ok
-}
-
-// serverACLInvalidPatternWarnings returns human-readable warnings for any
-// entries in allow/deny whose glob syntax is malformed under path.Match
-// semantics. Such patterns are silently treated as non-matching by the
-// lockout detector (and may misbehave server-side too), so surfacing them
-// at plan time catches typos early.
-func serverACLInvalidPatternWarnings(c *event.ServerACLEventContent) []string {
-	if c == nil {
-		return nil
-	}
-	var out []string
-	check := func(list []string, field string) {
-		for _, p := range list {
-			if _, err := path.Match(p, "probe.example"); err == path.ErrBadPattern {
-				out = append(out, fmt.Sprintf(
-					"%s entry %q is a malformed glob pattern (path.Match rejects it); it will be silently treated as non-matching by this provider's lockout checks and may behave unexpectedly server-side.",
-					field, p))
-			}
+	p := strings.ToLower(pattern)
+	s := strings.ToLower(server)
+	// Two pointers, with a backtrack point at the most recent "*".
+	pi, si, star, retry := 0, 0, -1, 0
+	for si < len(s) {
+		switch {
+		case pi < len(p) && (p[pi] == '?' || p[pi] == s[si]):
+			pi++
+			si++
+		case pi < len(p) && p[pi] == '*':
+			star, retry = pi, si
+			pi++
+		case star >= 0:
+			// The last "*" took too little. Give it one more character.
+			retry++
+			pi, si = star+1, retry
+		default:
+			return false
 		}
 	}
-	check(c.Allow, "allow")
-	check(c.Deny, "deny")
-	return out
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
+}
+
+// isIPLiteral reports whether a server name is an IP literal, the way Synapse
+// decides it in rust/src/acl/mod.rs: an IPv6 literal is bracketed, and an IPv4
+// literal must parse whole. A name that carries a port does not parse, and
+// Synapse lets that through, so this does not strip one either. A colon rules
+// out the IPv4-mapped form, which Rust rejects and Go accepts.
+func isIPLiteral(server string) bool {
+	if strings.HasPrefix(server, "[") {
+		return true
+	}
+	if strings.Contains(server, ":") {
+		return false
+	}
+	ip := net.ParseIP(server)
+	return ip != nil && ip.To4() != nil
+}
+
+// serverACLDenyAllDiag refuses an ACL whose allow list is empty.
+//
+// A homeserver checks deny first, then allow, and rejects everything that
+// matched neither. So an empty allow list denies every server, which is the
+// opposite of what this resource used to document. See rust/src/acl/mod.rs and
+// issue #57.
+//
+// This is an error rather than a warning because the damage cannot be undone
+// from this side. A deny-all ACL has no use that automation needs.
+// It reads the model rather than the built content, because an unknown allow
+// list and an empty one both reach event.ServerACLEventContent as a nil slice.
+// An allow list computed from another resource is unknown at plan time, and an
+// error on that would refuse a valid configuration.
+func serverACLDenyAllDiag(homeserver string, m *serverACLModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if m == nil || m.Allow.IsUnknown() {
+		return diags
+	}
+	if !m.Allow.IsNull() && len(m.Allow.Elements()) > 0 {
+		return diags
+	}
+	own := "your own homeserver"
+	if homeserver != "" {
+		own = "your own homeserver " + homeserver
+	}
+	diags.AddAttributeError(fwpath.Root("allow"), "The allow list denies every server",
+		"allow is empty, so this ACL denies every homeserver, "+own+" included. Every remote "+
+			"server rejects this room's events from your server after that, and rejects a "+
+			"corrective ACL too, so the room never federates again. Your own server still "+
+			"accepts your events, so local users see no change.\n\n"+
+			"Set allow = [\"*\"] to allow every server, then name what you want to block in deny.")
+	return diags
 }
 
 func callerHomeserver(c *Client) string {
@@ -181,11 +262,12 @@ func homeserverFromMXID(mxid string) string {
 	return mxid[idx+1:]
 }
 
-// ModifyPlan surfaces the self-lockout warning at plan time so users see it
-// before they run apply. Runs on both create and update plans; skipped on destroy.
+// ModifyPlan judges the ACL before an apply sends it. A plan that denies every
+// server is refused, and a likely self-lockout is a warning. It runs on create
+// and update plans, and is skipped on destroy, where there is nothing to send.
 func (r *serverACLResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
-		return // destroy plan — nothing to warn about
+		return // a destroy plan has nothing to warn about
 	}
 	var plan serverACLModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -194,12 +276,17 @@ func (r *serverACLResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	}
 	content, err := buildServerACLContent(ctx, &plan)
 	if err != nil {
-		return // malformed — Create/Update will surface the error
+		return // malformed: Create and Update surface the error
 	}
-	for _, w := range serverACLInvalidPatternWarnings(content) {
-		resp.Diagnostics.AddWarning("Malformed ACL pattern", w)
+	// The provider may not be configured yet, in which case this is empty and
+	// the diagnostics below word themselves without a server name.
+	homeserver := callerHomeserver(r.client)
+	// A deny-all ACL is refused rather than warned about. See issue #57.
+	resp.Diagnostics.Append(serverACLDenyAllDiag(homeserver, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
-	for _, w := range serverACLSelfLockoutWarnings(callerHomeserver(r.client), content) {
+	for _, w := range serverACLSelfLockoutWarnings(homeserver, content) {
 		resp.Diagnostics.AddWarning("Potential server ACL self-lockout", w)
 	}
 }
