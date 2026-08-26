@@ -31,6 +31,12 @@ type matrixProviderModel struct {
 // matrixHTTPRetries is how many times a request is retried after a rate limit or
 // a gateway error. Each retry waits for the homeserver's Retry-After, so a
 // higher number costs wall time rather than requests.
+//
+// This applies to every request, and mautrix retries transport errors as well as
+// status codes. That is safe only because every call this provider makes is
+// idempotent, so repeating one converges. A call that is not must disable this
+// and use retryOnRateLimit instead, which repeats a refusal but never an
+// ambiguous failure. /createRoom is the only such call today. See issue #51.
 const matrixHTTPRetries = 4
 
 func New(version string) func() provider.Provider {
