@@ -31,6 +31,37 @@ func httpErr(status int, code string) error {
 	return e
 }
 
+// TestNotFoundErr pins both branches of the predicate that decides whether a
+// destroy may treat its target as already gone.
+//
+// The status-code branch is load-bearing and was unpinned. Synapse answers a
+// purged room with 404 and errcode M_UNKNOWN, not M_NOT_FOUND, so anyone
+// simplifying notFoundErr to trust the errcode alone would make destroy
+// impossible for such a room while the suite stayed green. Issue #45 tightened
+// destroy to fail on a refusal, so this is the edge that must not swing too far.
+func TestNotFoundErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "Synapse purged room: 404 with M_UNKNOWN", err: httpErr(http.StatusNotFound, "M_UNKNOWN"), want: true},
+		{name: "404 with no errcode", err: httpErr(http.StatusNotFound, ""), want: true},
+		{name: "M_NOT_FOUND at another status", err: httpErr(http.StatusBadRequest, "M_NOT_FOUND"), want: true},
+		{name: "a refusal is not a missing thing", err: httpErr(http.StatusForbidden, "M_FORBIDDEN")},
+		{name: "a gateway error is not a missing thing", err: httpErr(http.StatusBadGateway, "M_UNKNOWN")},
+		{name: "a plain error is not a missing thing", err: errors.New("connection refused")},
+		{name: "no error at all", err: nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := notFoundErr(c.err); got != c.want {
+				t.Errorf("notFoundErr = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestFailedDestroy covers the rule every Delete now shares. Before issue #45
 // five of the six resources downgraded any destroy failure to a warning, so a
 // destroy that the homeserver refused still reported success and exit status 0,
@@ -42,7 +73,11 @@ func TestFailedDestroy(t *testing.T) {
 		wantError bool
 	}{
 		{name: "nothing went wrong", err: nil},
-		{name: "a 404 means it is already gone", err: httpErr(http.StatusNotFound, "")},
+		// The shape a homeserver really sends for a purged room: 404 with an
+		// errcode that is not M_NOT_FOUND. It reaches the tolerance only through
+		// the status-code branch of notFoundErr. See issue #52.
+		{name: "a 404 with any errcode means it is already gone", err: httpErr(http.StatusNotFound, "M_UNKNOWN")},
+		{name: "a 404 with no errcode means it is already gone", err: httpErr(http.StatusNotFound, "")},
 		{name: "M_NOT_FOUND means it is already gone", err: httpErr(http.StatusBadRequest, "M_NOT_FOUND")},
 		{name: "a refusal is a failure", err: httpErr(http.StatusForbidden, "M_FORBIDDEN"), wantError: true},
 		{name: "a rate limit is a failure", err: httpErr(http.StatusTooManyRequests, "M_LIMIT_EXCEEDED"), wantError: true},
