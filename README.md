@@ -160,11 +160,12 @@ See each resource's docs page for the exact ID format.
 | `make test` | Run unit tests |
 | `make testacc` | Run acceptance tests (`TF_ACC=1`). Needs a live Matrix homeserver. See `ci/compose.synapse.yml` for a disposable one |
 | `make docs` | Regenerate `docs/` via `tfplugindocs` |
+| `make check-version-pin` | Fail if a published version constraint has fallen behind the latest release tag |
 | `make vet` | `go vet ./...` |
 
 Contributions welcome. CI runs on every PR (build, vet, lint, tests, docs
-drift, example formatting, and the acceptance suite against a containerized
-Synapse). The acceptance workflow also runs nightly, because the Synapse image
+drift, example formatting, the version constraint in the published example,
+and the acceptance suite against a containerized Synapse). The acceptance workflow also runs nightly, because the Synapse image
 is unpinned.
 
 `make testacc` needs a homeserver it may pollute. A persistent one works: the

@@ -1,6 +1,8 @@
 OWNER   ?= raspbeguy
 NAME    ?= matrix
-VERSION ?= 0.1.0
+# Derived rather than written down, because a literal here went stale for four
+# releases and made `make install` drop the binary under a 0.1.0 path.
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0))
 OS_ARCH ?= $(shell go env GOOS)_$(shell go env GOARCH)
 
 # The acceptance harness reattaches the in-process provider under this address,
@@ -14,7 +16,7 @@ BINARY  := terraform-provider-$(NAME)
 TF_INSTALL_DIR := $(HOME)/.terraform.d/plugins/registry.terraform.io/$(OWNER)/$(NAME)/$(VERSION)/$(OS_ARCH)
 TOFU_INSTALL_DIR := $(HOME)/.terraform.d/plugins/registry.opentofu.org/$(OWNER)/$(NAME)/$(VERSION)/$(OS_ARCH)
 
-.PHONY: build install test testacc vet tidy clean docs
+.PHONY: build install test testacc vet tidy clean docs check-version-pin
 
 build:
 	go build -o $(BINARY) .
@@ -29,10 +31,10 @@ test:
 
 # Needs a homeserver it may pollute, and a persistent one is supported: the
 # aliases each test creates are randomised and cleaned up, so runs do not
-# collide. Each run does leave one room per test behind. Matrix has no way to
+# collide. Each run does leave the rooms it made behind. Matrix has no way to
 # delete a room, and destroy only makes the account leave, so purging them needs
-# the admin API, plus one extra room for a probe that asks whether the homeserver
-# lists rooms in its public directory.
+# the admin API. One of them is a probe that asks whether the homeserver lists
+# rooms in its public directory.
 testacc:
 	TF_ACC=1 \
 	TF_ACC_PROVIDER_HOST=$(TF_ACC_PROVIDER_HOST) \
@@ -55,3 +57,8 @@ docs:
 		--rendered-provider-name "Matrix" \
 		--examples-dir examples \
 		--rendered-website-dir docs
+
+# The constraint in examples/provider/provider.tf is copied into docs/index.md,
+# the first page the registry shows. Nothing bumps it, so CI checks it.
+check-version-pin:
+	sh ci/check-version-pin.sh

@@ -54,6 +54,15 @@ jobs:
       - name: Fail if go.mod/go.sum changed
         run: git diff --exit-code go.mod go.sum
 
+  version-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The check compares against the latest release tag, so it needs them.
+          fetch-depth: 0
+      - run: make check-version-pin
+
   docs-drift:
     runs-on: ubuntu-latest
     steps:
