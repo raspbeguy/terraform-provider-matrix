@@ -7,8 +7,9 @@ description: |-
   Permissions: setting your own per-room profile always works. Setting someone else's requires sufficient power level on the m.room.member event.
   Ordering with matrix_user_profile. Most homeservers (Synapse included) propagate global profile changes to every m.room.member event the user has, which wipes per-room overrides if the global change happens after the override. If you manage both, add depends_on = [matrix_user_profile.<name>] to this resource so Terraform applies the override last. Without that, you'll see perpetual drift after every apply.
   Override persists across leave/rejoin. Per-room overrides live in the m.room.member state event, which sticks around even after the user leaves the room (with membership = "leave"). If the user later rejoins, the previous displayname/avatar override is still attached. To fully clear an override, destroy this resource before the user leaves.
-  Fields you leave out are not touched. m.room.member has no way to say "inherit the global profile", so writing an empty value would not restore anything: it removes the field, and clients then show the raw mxid. A homeserver normally copies the global profile into the member event when the user joins, so leaving a field out keeps that value.
-  To remove an override, set the attribute to an empty string and apply. Destroying the resource drops it from state and leaves the m.room.member event as it is, for the same reason matrix_user_profile refuses to clear a global profile on destroy.
+  Fields you leave out are not touched, so whatever the room already shows stays. That is normally the global value, which a homeserver copies into the member event when the user joins.
+  To stop overriding a field, set it to an empty string and apply. The field is then omitted from the event, and a homeserver repopulates it from the global profile: Synapse does this for the display name. So an empty string means "stop overriding" rather than "show nothing", and the exact result depends on the homeserver and on whether a global value exists.
+  Destroying the resource drops it from state and leaves the m.room.member event as it is, for the same reason matrix_user_profile refuses to clear a global profile on destroy. Set the fields to an empty string and apply first if you want the override gone.
 ---
 
 # matrix_user_profile_override (Resource)
@@ -21,9 +22,11 @@ Permissions: setting your own per-room profile always works. Setting someone els
 
 **Override persists across leave/rejoin.** Per-room overrides live in the `m.room.member` state event, which sticks around even after the user leaves the room (with `membership = "leave"`). If the user later rejoins, the previous displayname/avatar override is still attached. To fully clear an override, destroy this resource before the user leaves.
 
-Fields you leave out are not touched. `m.room.member` has no way to say "inherit the global profile", so writing an empty value would not restore anything: it removes the field, and clients then show the raw mxid. A homeserver normally copies the global profile into the member event when the user joins, so leaving a field out keeps that value.
+Fields you leave out are not touched, so whatever the room already shows stays. That is normally the global value, which a homeserver copies into the member event when the user joins.
 
-To remove an override, set the attribute to an empty string and apply. Destroying the resource drops it from state and leaves the `m.room.member` event as it is, for the same reason `matrix_user_profile` refuses to clear a global profile on destroy.
+To stop overriding a field, set it to an empty string and apply. The field is then omitted from the event, and a homeserver repopulates it from the global profile: Synapse does this for the display name. So an empty string means "stop overriding" rather than "show nothing", and the exact result depends on the homeserver and on whether a global value exists.
+
+Destroying the resource drops it from state and leaves the `m.room.member` event as it is, for the same reason `matrix_user_profile` refuses to clear a global profile on destroy. Set the fields to an empty string and apply first if you want the override gone.
 
 ## Example Usage
 
@@ -39,8 +42,9 @@ data "matrix_whoami" "me" {}
 # avoids perpetual drift.
 # avatar_url is left out on purpose. A field you do not declare is not touched,
 # so the room keeps whatever it shows, normally the global avatar. Set a field to
-# an empty string to clear the override; destroying the resource leaves the
-# m.room.member event alone.
+# an empty string to stop overriding it, which lets the homeserver fall back to
+# the global profile. Destroying the resource leaves the m.room.member event
+# alone.
 resource "matrix_user_profile_override" "bot_in_oncall" {
   room_id      = matrix_room.oncall.id
   user_id      = data.matrix_whoami.me.user_id
@@ -60,8 +64,8 @@ resource "matrix_user_profile_override" "bot_in_oncall" {
 
 ### Optional
 
-- `avatar_url` (String) Per-room avatar mxc:// URI. Leave it out and this resource does not touch the field, so whatever the room already shows stays, which is normally the global avatar. Set it to an empty string to clear the override.
-- `display_name` (String) Per-room display name. Leave it out and this resource does not touch the field, so whatever the room already shows stays, which is normally the global display name. Set it to an empty string to clear the override.
+- `avatar_url` (String) Per-room avatar mxc:// URI. Leave it out and this resource does not touch the field, so whatever the room already shows stays, which is normally the global avatar. Set it to an empty string to stop overriding it.
+- `display_name` (String) Per-room display name. Leave it out and this resource does not touch the field, so whatever the room already shows stays, which is normally the global display name. Set it to an empty string to stop overriding it.
 
 ### Read-Only
 

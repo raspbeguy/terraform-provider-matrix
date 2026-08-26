@@ -219,6 +219,22 @@ func testAccCheckMemberProfile(t *testing.T, roomResourceName, wantName, wantAva
 	}
 }
 
+// testAccCheckGlobalDisplayName asserts the room shows the account's global
+// display name rather than an override, and that the avatar is untouched.
+//
+// The global name is read rather than hardcoded: it is whatever the CI
+// homeserver gave the test account.
+func testAccCheckGlobalDisplayName(t *testing.T, roomResourceName, wantAvatar string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		c := testAccClient(t)
+		global, err := c.MX.GetDisplayName(context.Background(), c.MX.UserID)
+		if err != nil {
+			return fmt.Errorf("read global display name: %w", err)
+		}
+		return testAccCheckMemberProfile(t, roomResourceName, global.DisplayName, wantAvatar)(s)
+	}
+}
+
 // TestAccUserProfileOverride_LeavesUndeclaredFieldAlone is the regression test
 // for issue #39. A resource declaring only display_name used to write an empty
 // avatar_url, and because the field is omitempty that removed the key, stripping
@@ -246,9 +262,12 @@ func TestAccUserProfileOverride_LeavesUndeclaredFieldAlone(t *testing.T) {
 				Check:  testAccCheckMemberProfile(t, "matrix_room.test", "Terrabot renamed", avatar),
 			},
 			{
-				// An empty string is the only way to remove an override.
+				// An empty string removes the override. It does not leave the
+				// field blank: a homeserver repopulates a member event that omits
+				// displayname from the global profile, which Synapse does. So the
+				// effect is "stop overriding", not "show nothing".
 				Config: testAccOverrideConfig(""),
-				Check:  testAccCheckMemberProfile(t, "matrix_room.test", "", avatar),
+				Check:  testAccCheckGlobalDisplayName(t, "matrix_room.test", avatar),
 			},
 			{
 				Config:   testAccOverrideConfig(""),
