@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"maunium.net/go/mautrix/id"
@@ -57,6 +58,50 @@ func TestNotFoundErr(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := notFoundErr(c.err); got != c.want {
 				t.Errorf("notFoundErr = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestAmbiguousErr pins which failures leave it unknown whether the homeserver
+// did the work. Only those may carry the warning that a room might exist. See
+// issue #55: the warning used to go out with every create failure, including a
+// rate limit, which proves the opposite.
+func TestAmbiguousErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "a transport failure never reached a server", err: errors.New("connection reset"), want: true},
+		{name: "a request with no response at all", err: mautrix.HTTPError{Message: "timeout"}, want: true},
+		{name: "500 from the homeserver", err: httpErr(http.StatusInternalServerError, "M_UNKNOWN"), want: true},
+		{name: "502 from a gateway", err: httpErr(http.StatusBadGateway, ""), want: true},
+		{name: "503 from a load balancer", err: httpErr(http.StatusServiceUnavailable, ""), want: true},
+		{name: "504 from a gateway", err: httpErr(http.StatusGatewayTimeout, "M_UNKNOWN"), want: true},
+		{
+			// mautrix reports a body it could not read or parse with the
+			// successful response attached. The homeserver made the room and
+			// nothing knows its id.
+			name: "a success whose body could not be parsed", err: httpErr(http.StatusOK, ""), want: true,
+		},
+		{name: "a redirect nobody followed", err: httpErr(http.StatusFound, ""), want: true},
+		{name: "a rate limit was refused before any work", err: httpErr(http.StatusTooManyRequests, "M_LIMIT_EXCEEDED")},
+		{name: "a forbidden is a refusal", err: httpErr(http.StatusForbidden, "M_FORBIDDEN")},
+		{name: "a bad request is a refusal", err: httpErr(http.StatusBadRequest, "M_UNSUPPORTED_ROOM_VERSION")},
+		{name: "a not found is a refusal", err: httpErr(http.StatusNotFound, "M_NOT_FOUND")},
+		{
+			// The shape retryOnRateLimit returns when the wait is cancelled.
+			// The cancellation alone would read as ambiguous, so the refusal
+			// has to travel with it.
+			name: "a cancelled backoff still carries its refusal",
+			err:  errors.Join(context.Canceled, httpErr(http.StatusTooManyRequests, "M_LIMIT_EXCEEDED")),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ambiguousErr(c.err); got != c.want {
+				t.Errorf("ambiguousErr = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -115,6 +160,9 @@ type createRoomServer struct {
 	t        *testing.T
 	statuses []int
 	seen     int
+	// brokenBody cuts the success body short. The room exists, and the client
+	// never learns its id. mautrix reports that with the 2xx response attached.
+	brokenBody bool
 }
 
 func (s *createRoomServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +179,10 @@ func (s *createRoomServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch status {
 	case http.StatusOK:
 		w.Header().Set("Content-Type", "application/json")
+		if s.brokenBody {
+			_, _ = w.Write([]byte(`{"room_id":`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"room_id":"!created:example.com"}`))
 	case http.StatusTooManyRequests:
 		w.Header().Set("Retry-After", "0")
@@ -144,11 +196,35 @@ func (s *createRoomServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// invitesSet turns a list of user ids into the attribute value createRoomLike
+// reads, or a null set when there are none.
+func invitesSet(t *testing.T, invites []string) types.Set {
+	t.Helper()
+	if len(invites) == 0 {
+		return types.SetNull(types.StringType)
+	}
+	values := make([]attr.Value, len(invites))
+	for i, u := range invites {
+		values[i] = types.StringValue(u)
+	}
+	set, diags := types.SetValue(types.StringType, values)
+	if diags.HasError() {
+		t.Fatalf("building the invite set: %v", diags)
+	}
+	return set
+}
+
 // createRoomOnce drives createRoomLike against a scripted server and reports how
 // many creates arrived.
 func createRoomOnce(t *testing.T, statuses ...int) (id.RoomID, diag.Diagnostics, int) {
 	t.Helper()
-	handler := &createRoomServer{t: t, statuses: statuses}
+	return runCreateRoom(t, &createRoomServer{t: t, statuses: statuses})
+}
+
+// runCreateRoom drives createRoomLike against a scripted server. Any invites
+// given go into the create request, which changes what a refusal means.
+func runCreateRoom(t *testing.T, handler *createRoomServer, invites ...string) (id.RoomID, diag.Diagnostics, int) {
+	t.Helper()
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -168,7 +244,7 @@ func createRoomOnce(t *testing.T, statuses ...int) (id.RoomID, diag.Diagnostics,
 		Visibility:        types.StringNull(),
 		RoomVersion:       types.StringNull(),
 		RoomAliasName:     types.StringNull(),
-		InitialInvites:    types.SetNull(types.StringType),
+		InitialInvites:    invitesSet(t, invites),
 		HistoryVisibility: types.StringNull(),
 	}
 	var diags diag.Diagnostics
@@ -209,6 +285,122 @@ func TestCreateRoomRetriedOnRateLimit(t *testing.T) {
 	}
 	if roomID != "!created:example.com" {
 		t.Errorf("room id = %q, want the one the second attempt returned", roomID)
+	}
+}
+
+// The two sentences that must reach a practitioner only when they are true.
+const (
+	adviceRoomMayExist = "A room may exist"
+	adviceApplyAgain   = "rate limited every attempt"
+	adviceInvitesSent  = "The request carried invites"
+)
+
+// TestCreateRoomAdviceMatchesTheFailure drives the real error out of
+// retryOnRateLimit rather than testing the classifier alone, because the bug in
+// issue #55 was in which error reaches the message, not in how it is read.
+func TestCreateRoomAdviceMatchesTheFailure(t *testing.T) {
+	// Every attempt refused. This is the case issue #55 reported: the
+	// homeserver created nothing and applying again is the fix, yet the error
+	// said a room might exist and warned against retrying.
+	exhausted := make([]int, matrixHTTPRetries+1)
+	for i := range exhausted {
+		exhausted[i] = http.StatusTooManyRequests
+	}
+
+	cases := []struct {
+		name       string
+		statuses   []int
+		invites    []string
+		wantCreate int
+		want       string
+		notWant    []string
+	}{
+		{
+			name:     "a gateway timeout leaves the outcome unknown",
+			statuses: []int{http.StatusGatewayTimeout}, wantCreate: 1,
+			want: adviceRoomMayExist, notWant: []string{adviceApplyAgain},
+		},
+		{
+			name:     "an exhausted rate limit created nothing",
+			statuses: exhausted, wantCreate: len(exhausted),
+			want: adviceApplyAgain, notWant: []string{adviceRoomMayExist},
+		},
+		{
+			// Synapse checks the rate limit at the top of create_room, before
+			// it validates anything or touches the database, so invites in the
+			// request change nothing here.
+			name:     "an exhausted rate limit with invites still created nothing",
+			statuses: exhausted, invites: []string{"@invitee:example.com"},
+			wantCreate: len(exhausted),
+			want:       adviceApplyAgain, notWant: []string{adviceRoomMayExist},
+		},
+		{
+			// The homeserver said why. Anything this provider adds is noise.
+			name:     "a refusal speaks for itself",
+			statuses: []int{http.StatusForbidden}, wantCreate: 1,
+			notWant: []string{adviceRoomMayExist, adviceApplyAgain},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, diags, creates := runCreateRoom(t,
+				&createRoomServer{t: t, statuses: c.statuses}, c.invites...)
+			if creates != c.wantCreate {
+				t.Errorf("the homeserver saw %d creates, want %d", creates, c.wantCreate)
+			}
+			if !diags.HasError() {
+				t.Fatal("want an error when the create fails")
+			}
+			detail := diags[0].Detail()
+			if c.want != "" && !strings.Contains(detail, c.want) {
+				t.Errorf("detail must contain %q; got %q", c.want, detail)
+			}
+			for _, unwanted := range c.notWant {
+				if strings.Contains(detail, unwanted) {
+					t.Errorf("detail must not contain %q; got %q", unwanted, detail)
+				}
+			}
+		})
+	}
+}
+
+// TestCreateRoomAdviceOnRefusedInvite covers the one refusal that still leaves a
+// room behind. Synapse makes the room and its state first, then sends the
+// invites one at a time and rolls nothing back if one fails, so a 403 from an
+// invite arrives with the room already made. See synapse/handlers/room.py, where
+// the invite loop runs after _send_events_for_new_room.
+func TestCreateRoomAdviceOnRefusedInvite(t *testing.T) {
+	_, diags, creates := runCreateRoom(t,
+		&createRoomServer{t: t, statuses: []int{http.StatusForbidden}},
+		"@invitee:example.com")
+	if creates != 1 {
+		t.Errorf("the homeserver saw %d creates, want 1", creates)
+	}
+	if !diags.HasError() {
+		t.Fatal("want an error when the create fails")
+	}
+	if !strings.Contains(diags[0].Detail(), adviceInvitesSent) {
+		t.Errorf("a refused invite can leave a room behind; got %q", diags[0].Detail())
+	}
+}
+
+// TestCreateRoomAdviceOnUnreadableSuccess covers the worst outcome of all: the
+// homeserver made the room and the reply never arrived intact, so nothing knows
+// the room id. mautrix reports that with the 2xx response attached, so a rule
+// that called every answered request a refusal would stay silent about a room
+// that exists.
+func TestCreateRoomAdviceOnUnreadableSuccess(t *testing.T) {
+	_, diags, creates := runCreateRoom(t, &createRoomServer{
+		t: t, statuses: []int{http.StatusOK}, brokenBody: true,
+	})
+	if creates != 1 {
+		t.Errorf("the homeserver saw %d creates, want 1", creates)
+	}
+	if !diags.HasError() {
+		t.Fatal("want an error when the reply cannot be read")
+	}
+	if !strings.Contains(diags[0].Detail(), adviceRoomMayExist) {
+		t.Errorf("the room does exist and its id is lost; got %q", diags[0].Detail())
 	}
 }
 
@@ -296,6 +488,12 @@ func TestRateLimitRetryHonoursCancellation(t *testing.T) {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("err = %v, want context.Canceled", err)
+		}
+		// The rate limit has to travel out with the cancellation, or the
+		// caller reads the outcome as unknown and warns that a room may
+		// exist. See issue #55.
+		if ambiguousErr(err) {
+			t.Errorf("a cancelled backoff created nothing; err = %v reads as ambiguous", err)
 		}
 	case <-time.After(rateLimitFallback + time.Second):
 		t.Fatal("retryOnRateLimit ignored cancellation and waited out the backoff")

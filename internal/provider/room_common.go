@@ -43,6 +43,42 @@ type spaceModel struct {
 	baseRoomModel
 }
 
+// createFailureAdvice returns what to tell a practitioner after /createRoom
+// failed. What to do next depends on whether the room might exist.
+//
+// Creating a room is the one non-idempotent call this provider makes, so an
+// unknown outcome has to be checked by hand. That advice is wrong for a
+// refusal, which created nothing: it sends someone hunting for a room that is
+// not there, and warns against the retry that is in fact the fix. See #55.
+//
+// withInvites says the request carried initial_invites, which makes even a
+// refusal unsafe. Synapse creates the room and its state first, then sends the
+// invites one at a time, and rolls nothing back if one of them fails. So a 403
+// on an invite arrives with the room already made.
+func createFailureAdvice(err error, withInvites bool) string {
+	// Ambiguous is tested first, so an error that somehow reads as both gets
+	// the careful answer.
+	if ambiguousErr(err) {
+		return "\n\nA room may exist even though this failed. Creating a room cannot be retried " +
+			"safely, because the Matrix specification gives no way to ask a homeserver whether it " +
+			"already did the work, so a timeout or a gateway error leaves the outcome unknown. " +
+			"Check the homeserver before applying again, or a second room will be created."
+	}
+	if _, limited := rateLimitWait(err); limited {
+		return "\n\nThe homeserver rate limited every attempt, so it created no room. Apply " +
+			"again, or raise the rate limits on the homeserver if this repeats."
+	}
+	if withInvites {
+		return "\n\nA room may exist even though this failed. The request carried invites, and " +
+			"a homeserver sends those after it has made the room, so a refusal at that point " +
+			"leaves the room behind. Check the homeserver before applying again, or a second " +
+			"room will be created."
+	}
+	// The homeserver refused before it did any work, and said why. Its own
+	// error is the whole answer.
+	return ""
+}
+
 // createRoomLike creates either a normal room or a space depending on isSpace.
 // `encryption` and `isDirect` are room-only flags; they should be false when
 // creating a space (the space variant doesn't expose those attributes).
@@ -125,11 +161,7 @@ func createRoomLike(ctx context.Context, c *Client, m *baseRoomModel, encryption
 		return c.MX.CreateRoom(ctx, req)
 	})
 	if err != nil {
-		diags.AddError("Failed to create room", err.Error()+
-			"\n\nA room may exist even though this failed. Creating a room cannot be retried "+
-			"safely, because the Matrix specification gives no way to ask a homeserver whether it "+
-			"already did the work, so a timeout or a gateway error leaves the outcome unknown. "+
-			"Check the homeserver before applying again, or a second room will be created.")
+		diags.AddError("Failed to create room", err.Error()+createFailureAdvice(err, len(req.Invite) > 0))
 		return ""
 	}
 	// /createRoom carries visibility, but a homeserver is free to ignore it,

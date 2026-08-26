@@ -187,8 +187,12 @@ whether the homeserver lists rooms in its public directory.
   ambiguous failure. `POST /createRoom` carries no transaction id, so a timeout
   or a gateway error leaves it unknown whether the homeserver made the room, and
   repeating it can make a second one that nothing surfaces. A rate limit is still
-  retried, because the homeserver refuses that before doing any work. If a create
-  fails, check the homeserver before applying again: a room may exist.
+  retried, because the homeserver refuses that before doing any work. The error
+  tells you which kind of failure it was. A homeserver that refused before it did
+  any work made no room, so apply again. An unknown outcome asks you to check the
+  homeserver first, and so does a refusal on a request that carried
+  `initial_invites`: a homeserver sends invites after it has made the room, so a
+  refusal there leaves the room behind.
 - A destroy that the homeserver refuses is an error, not a warning. `terraform
   destroy` used to report success over work it never did, so a teardown could
   exit 0 with people still in rooms. The usual cause is power: kicking anyone
