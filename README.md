@@ -226,6 +226,12 @@ containerized Synapse.
   a corrective ACL, and only a homeserver admin can recover. The provider
   emits a plan-time warning when it detects a likely self-lockout, but
   double-check `allow` / `deny` before applying.
+- `matrix_user_profile_override` only touches the fields you declare. Leave one
+  out and the room keeps whatever it shows, normally the global value a
+  homeserver copies into `m.room.member` at join. `m.room.member` has no way to
+  say "inherit", so an empty value removes the field and clients show the raw
+  mxid. Set an attribute to an empty string to clear an override on purpose.
+  Destroying the resource leaves the member event alone.
 - When using both `matrix_user_profile` and `matrix_user_profile_override`,
   add `depends_on = [matrix_user_profile.<name>]` to the override resource.
   Most homeservers propagate global profile changes to every `m.room.member`
