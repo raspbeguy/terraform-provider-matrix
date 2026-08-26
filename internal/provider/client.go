@@ -56,6 +56,41 @@ func notFoundErr(err error) bool {
 	return httpErr.Response != nil && httpErr.Response.StatusCode == 404
 }
 
+// ambiguousErr reports whether err leaves it unknown whether the homeserver did
+// the work.
+//
+// Only one answer is definite: a 4xx, where the homeserver read the request and
+// refused it. Everything else leaves the outcome unknown, and only then is it
+// unsafe to simply try again. See issue #55.
+//
+// The rule is structural rather than a list of errcodes, so it does not depend
+// on when a given homeserver validates what.
+//
+// A homeserver could in principle do the work and then fail a later step with a
+// 4xx. Nothing rules that out, so this is the best available reading of an
+// error, not a proof.
+func ambiguousErr(err error) bool {
+	var httpErr mautrix.HTTPError
+	if !errors.As(err, &httpErr) {
+		// A transport failure, a timeout, or anything else that never reached
+		// a server.
+		return true
+	}
+	if httpErr.Response == nil {
+		// mautrix reports a request that got no response this way, and also a
+		// request it could not build or marshal.
+		return true
+	}
+	// Anything outside 4xx: a 5xx, where a gateway gave up and cannot say what
+	// the homeserver behind it did, or where the homeserver failed after it may
+	// have committed the room. Also a 2xx whose body mautrix could not read or
+	// parse, which it reports with the successful response attached. The room
+	// exists in that case and nothing knows its id, which is the worst outcome
+	// of all to stay quiet about.
+	status := httpErr.Response.StatusCode
+	return status < 400 || status >= 500
+}
+
 // rateLimitFallback is the wait used when a homeserver says it is rate limiting
 // but gives no hint about how long. rateLimitCap bounds the wait, so a broken or
 // hostile Retry-After cannot hang an apply.
@@ -126,7 +161,11 @@ func retryOnRateLimit[T any](ctx context.Context, attempts int, fn func(context.
 		}
 		select {
 		case <-ctx.Done():
-			return zero, ctx.Err()
+			// No request is in flight during the wait, and the attempt before
+			// it was a refusal, so nothing was done. Carry that refusal out
+			// with the cancellation, or a caller reads a bare context error as
+			// an unknown outcome. See issue #55.
+			return zero, errors.Join(ctx.Err(), err)
 		case <-time.After(wait):
 		}
 	}
