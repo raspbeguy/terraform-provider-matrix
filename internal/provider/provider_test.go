@@ -2,7 +2,9 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
@@ -47,20 +49,41 @@ func testAccSkipUnlessAcc(t *testing.T) {
 	}
 }
 
-// testAccClient builds a raw client so a test can assert on what actually
+var (
+	testAccClientOnce sync.Once
+	testAccClientVal  *Client
+	testAccClientErr  error
+)
+
+// testAccClient returns a raw client so a test can assert on what actually
 // landed on the homeserver, not only on what the provider wrote to state.
+//
+// Built once. Every check function used to build its own and call /whoami,
+// which spends the single test account's rate-limit budget on nothing. It also
+// sets the same retry count the provider does: mautrix.NewClient leaves
+// DefaultHTTPRetries at zero, so without it a helper gives up on the first 429,
+// which is how the suite failed once it grew past five tests.
 func testAccClient(t *testing.T) *Client {
 	t.Helper()
-	mcli, err := mautrix.NewClient(os.Getenv("MATRIX_HOMESERVER_URL"), id.UserID(os.Getenv("MATRIX_USER_ID")), os.Getenv("MATRIX_ACCESS_TOKEN"))
-	if err != nil {
-		t.Fatalf("mautrix.NewClient: %v", err)
+	testAccClientOnce.Do(func() {
+		mcli, err := mautrix.NewClient(os.Getenv("MATRIX_HOMESERVER_URL"), id.UserID(os.Getenv("MATRIX_USER_ID")), os.Getenv("MATRIX_ACCESS_TOKEN"))
+		if err != nil {
+			testAccClientErr = fmt.Errorf("mautrix.NewClient: %w", err)
+			return
+		}
+		mcli.DefaultHTTPRetries = matrixHTTPRetries
+		who, err := mcli.Whoami(context.Background())
+		if err != nil {
+			testAccClientErr = fmt.Errorf("whoami: %w", err)
+			return
+		}
+		mcli.UserID = who.UserID
+		testAccClientVal = &Client{MX: mcli}
+	})
+	if testAccClientErr != nil {
+		t.Fatalf("%v", testAccClientErr)
 	}
-	who, err := mcli.Whoami(context.Background())
-	if err != nil {
-		t.Fatalf("whoami: %v", err)
-	}
-	mcli.UserID = who.UserID
-	return &Client{MX: mcli}
+	return testAccClientVal
 }
 
 // testAccUserID is the mxid the run authenticates as. The CI homeserver
