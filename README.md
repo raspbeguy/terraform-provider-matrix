@@ -244,11 +244,19 @@ whether the homeserver lists rooms in its public directory.
   This applies to accounts whose power comes from `users`. In room version 12
   and later, the account that created the room keeps its power whatever
   `users` says.
-- `matrix_room_server_acl` can irreversibly lock the caller's homeserver out
-  of the room if misconfigured — once your server is blocked, you cannot send
-  a corrective ACL, and only a homeserver admin can recover. The provider
-  emits a plan-time warning when it detects a likely self-lockout, but
-  double-check `allow` / `deny` before applying.
+- `matrix_room_server_acl` cannot be undone once it blocks your own server.
+  Every remote server then rejects this room's events from you, and rejects a
+  corrective ACL too, so the room never federates again. Your own server still
+  accepts your events, so local users see no change. The provider refuses a
+  plan whose `allow` list denies every server, and warns when it detects a
+  likely self-lockout. Check `allow` and `deny` before you apply.
+- `matrix_room_state` refuses an event type that a typed resource owns, and
+  names the resource to use instead. Two resources cannot own one event: each
+  apply writes one value, each refresh reads the other, and the plan never
+  settles. Its destroy clears the event content, because Matrix has no way to
+  remove a state event. So it refuses to clear `m.room.power_levels` and
+  `m.room.server_acl`, whose clearing locks the room. Use `terraform state rm`
+  on such a resource instead.
 - `matrix_user_profile_override` only touches the fields you declare. Leave one
   out and the room keeps whatever it shows, normally the global value a
   homeserver copies into `m.room.member` at join. `m.room.member` has no way to

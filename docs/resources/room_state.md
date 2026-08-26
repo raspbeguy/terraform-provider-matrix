@@ -4,20 +4,43 @@ page_title: "matrix_room_state Resource - Matrix"
 subcategory: ""
 description: |-
   Sends an arbitrary state event. Escape hatch for anything not covered by typed resources.
+  An event type that a typed resource owns is refused. Two resources cannot own one event: each apply writes one value, each refresh reads the other, and the plan never settles. The error names the resource to use.
+  Destroy clears the event content, because Matrix has no way to remove a state event. For m.room.power_levels and m.room.server_acl that cannot be undone, so this resource refuses to clear them. Use terraform state rm on such a resource instead.
 ---
 
 # matrix_room_state (Resource)
 
 Sends an arbitrary state event. Escape hatch for anything not covered by typed resources.
 
+An event type that a typed resource owns is refused. Two resources cannot own one event: each apply writes one value, each refresh reads the other, and the plan never settles. The error names the resource to use.
+
+Destroy clears the event content, because Matrix has no way to remove a state event. For `m.room.power_levels` and `m.room.server_acl` that cannot be undone, so this resource refuses to clear them. Use `terraform state rm` on such a resource instead.
+
 ## Example Usage
 
 ```terraform
-resource "matrix_room_state" "history_world_readable" {
-  room_id      = matrix_room.example.id
-  event_type   = "m.room.history_visibility"
-  state_key    = ""
-  content_json = jsonencode({ history_visibility = "world_readable" })
+# The escape hatch, for a state event no typed resource covers. An event type
+# that a typed resource owns is refused, and the error names the resource to
+# use instead.
+resource "matrix_room_state" "pinned" {
+  room_id    = matrix_room.example.id
+  event_type = "m.room.pinned_events"
+  state_key  = ""
+  content_json = jsonencode({
+    pinned = ["$abcdef1234567890:example.com"]
+  })
+}
+
+# A custom event type with a state key.
+resource "matrix_room_state" "widget" {
+  room_id    = matrix_room.example.id
+  event_type = "im.vector.modular.widgets"
+  state_key  = "grafana"
+  content_json = jsonencode({
+    type = "m.custom"
+    url  = "https://grafana.example.com/d/abc"
+    name = "Dashboard"
+  })
 }
 ```
 
@@ -49,6 +72,6 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 # State key is optional; defaults to "" (empty) for events like m.room.pinned_events.
 terraform import matrix_room_state.example '!abcDEF:example.com|m.room.pinned_events'
 
-# With an explicit state_key (e.g. m.room.member keyed by mxid):
-terraform import matrix_room_state.other '!abcDEF:example.com|m.room.member|@alice:example.com'
+# With an explicit state_key:
+terraform import matrix_room_state.widget '!abcDEF:example.com|im.vector.modular.widgets|grafana'
 ```
