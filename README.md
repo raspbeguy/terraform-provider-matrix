@@ -231,8 +231,9 @@ containerized Synapse.
   homeserver copies into `m.room.member` at join. `m.room.member` has no way to
   say "inherit", so setting an attribute to an empty string omits the field and
   the homeserver repopulates it from the global profile: Synapse does this for
-  the display name. That is how you stop overriding a field. Destroying the
-  resource leaves the member event alone.
+  the display name. That is how you stop overriding a field, and while it is set
+  that way the provider stops tracking what the room shows for it. Destroying
+  the resource leaves the member event alone.
 - When using both `matrix_user_profile` and `matrix_user_profile_override`,
   add `depends_on = [matrix_user_profile.<name>]` to the override resource.
   Most homeservers propagate global profile changes to every `m.room.member`
