@@ -31,7 +31,8 @@ test:
 # aliases each test creates are randomised and cleaned up, so runs do not
 # collide. Each run does leave one room per test behind. Matrix has no way to
 # delete a room, and destroy only makes the account leave, so purging them needs
-# the admin API.
+# the admin API, plus one extra room for a probe that asks whether the homeserver
+# lists rooms in its public directory.
 testacc:
 	TF_ACC=1 \
 	TF_ACC_PROVIDER_HOST=$(TF_ACC_PROVIDER_HOST) \

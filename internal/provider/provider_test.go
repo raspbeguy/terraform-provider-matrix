@@ -55,6 +55,44 @@ var (
 	testAccClientErr  error
 )
 
+var (
+	testAccPublishOnce sync.Once
+	testAccPublishes   bool
+)
+
+// testAccHomeserverPublishes reports whether this homeserver will list a room in
+// the public directory.
+//
+// Synapse denies it by default, through room_list_publication_rules, so the
+// answer differs between the CI container, which #44 configures to allow it, and
+// a typical deployment. A test that assumed one of them is how issue #49
+// happened.
+//
+// It has to be probed rather than tolerated. On a Config step
+// ExpectNonEmptyPlan is strict in both directions: an unexpected non-empty plan
+// fails, and so does an expected one that turns out empty. There is no setting
+// that accepts either, and the steps are declared before anything runs.
+//
+// Probed once per run, with a throwaway room. That room is left behind like
+// every other room these tests create, because Matrix has no way to delete one.
+func testAccHomeserverPublishes(t *testing.T) bool {
+	t.Helper()
+	testAccPublishOnce.Do(func() {
+		c := testAccClient(t)
+		resp, err := c.MX.CreateRoom(context.Background(), &mautrix.ReqCreateRoom{
+			Name:       "tf-acc-publication-probe",
+			Preset:     "private_chat",
+			Visibility: "public",
+		})
+		if err != nil {
+			t.Fatalf("probe room: %v", err)
+		}
+		vis, found, err := getRoomVisibility(context.Background(), c, resp.RoomID)
+		testAccPublishes = err == nil && found && vis == "public"
+	})
+	return testAccPublishes
+}
+
 // testAccClient returns a raw client so a test can assert on what actually
 // landed on the homeserver, not only on what the provider wrote to state.
 //

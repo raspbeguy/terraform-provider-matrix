@@ -171,7 +171,8 @@ is unpinned.
 aliases each test creates are randomised and cleaned up afterwards, so repeated
 runs do not collide. Each run leaves one room per test behind, because Matrix
 has no way to delete a room and destroy only makes the account leave. Purging
-them needs the admin API.
+them needs the admin API, plus one extra room per run for a probe that asks
+whether the homeserver lists rooms in its public directory.
 
 ## Caveats
 

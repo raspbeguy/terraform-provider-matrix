@@ -600,6 +600,7 @@ func TestAccRoom_VisibilityDriftIsDetected(t *testing.T) {
 	const name = "matrix_room.test"
 	alias := acctest.RandomWithPrefix("tf-acc-visibility")
 	config := testAccRoomVisibilityConfig(alias)
+	publishes := testAccHomeserverPublishes(t)
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
@@ -611,17 +612,17 @@ func TestAccRoom_VisibilityDriftIsDetected(t *testing.T) {
 				// homeserver, because the apply records the requested value either
 				// way.
 				//
-				// ExpectNonEmptyPlan because a homeserver that refuses to publish
-				// leaves the directory private, and the fix from #41 then reports
-				// that on the post-apply refresh. That plan is correct, so the step
-				// must tolerate it. Here the flag only tolerates a non-empty plan,
-				// it does not require one, so a permitting homeserver is
-				// unaffected. See issue #49.
+				// The plan does not. A homeserver that refuses to publish leaves
+				// the directory private, and the fix from #41 then reports that on
+				// the post-apply refresh, so the plan is non-empty and correct. One
+				// that publishes gives an empty plan. ExpectNonEmptyPlan is strict
+				// in both directions on a Config step, so the flag has to match the
+				// homeserver rather than tolerate either. See issue #49.
 				Config: config,
 				ConfigStateChecks: []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(name, tfjsonpath.New("visibility"), knownvalue.StringExact("public")),
 				},
-				ExpectNonEmptyPlan: true,
+				ExpectNonEmptyPlan: !publishes,
 			},
 			{
 				// Unpublish behind Terraform's back. A step's Check runs before
