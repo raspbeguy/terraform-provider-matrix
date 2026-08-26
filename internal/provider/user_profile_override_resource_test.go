@@ -123,6 +123,13 @@ func TestRefreshProfileField(t *testing.T) {
 			managed: types.StringValue(""), server: "", want: types.StringValue(""),
 		},
 		{
+			// A homeserver repopulates an omitted field from the global profile.
+			// Recording that would diff against the configuration on every plan,
+			// forever, which is how the acceptance run caught it.
+			name:    "a declared empty survives the homeserver repopulating the field",
+			managed: types.StringValue(""), server: "Global Name", want: types.StringValue(""),
+		},
+		{
 			name:    "a declared name against an absent value becomes null, so drift shows",
 			managed: types.StringValue("Bot"), server: "", want: types.StringNull(),
 		},

@@ -46,7 +46,7 @@ func (r *userProfileOverrideResource) Schema(_ context.Context, _ resource.Schem
 			"**Ordering with `matrix_user_profile`.** Most homeservers (Synapse included) propagate global profile changes to every `m.room.member` event the user has, which wipes per-room overrides if the global change happens *after* the override. If you manage both, add `depends_on = [matrix_user_profile.<name>]` to this resource so Terraform applies the override last. Without that, you'll see perpetual drift after every apply.\n\n" +
 			"**Override persists across leave/rejoin.** Per-room overrides live in the `m.room.member` state event, which sticks around even after the user leaves the room (with `membership = \"leave\"`). If the user later rejoins, the previous displayname/avatar override is still attached. To fully clear an override, destroy this resource before the user leaves.\n\n" +
 			"Fields you leave out are not touched, so whatever the room already shows stays. That is normally the global value, which a homeserver copies into the member event when the user joins.\n\n" +
-			"To stop overriding a field, set it to an empty string and apply. The field is then omitted from the event, and a homeserver repopulates it from the global profile: Synapse does this for the display name. So an empty string means \"stop overriding\" rather than \"show nothing\", and the exact result depends on the homeserver and on whether a global value exists.\n\n" +
+			"To stop overriding a field, set it to an empty string and apply. The field is then omitted from the event, and a homeserver repopulates it from the global profile: Synapse does this for the display name. So an empty string means \"stop overriding\" rather than \"show nothing\", and the exact result depends on the homeserver and on whether a global value exists. While a field is set to an empty string the provider stops tracking what the room shows for it, exactly as it does for a field you leave out.\n\n" +
 			"Destroying the resource drops it from state and leaves the `m.room.member` event as it is, for the same reason `matrix_user_profile` refuses to clear a global profile on destroy. Set the fields to an empty string and apply first if you want the override gone.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
@@ -110,15 +110,21 @@ func overlayProfile(m *userProfileOverrideModel, current *event.MemberEventConte
 // refreshProfileField returns the value to record for a field the configuration
 // manages.
 //
-// A server with no value is ambiguous: it means "cleared" for a configuration
-// that asked for that, and "gone" for one that asked for a name. Keep a declared
-// empty string rather than flipping it to null, or the plan diffs on every run.
+// A declared empty string wins over whatever the homeserver reports, because it
+// declares intent rather than mirroring the room: the server repopulates an
+// omitted field from the global profile, and recording that would diff forever.
+// The cost is that drift on a field you have stopped overriding is not reported,
+// which is the same trade the unmanaged case above already makes.
 func refreshProfileField(managed types.String, server string) types.String {
+	if !managed.IsNull() && managed.ValueString() == "" {
+		// A declared empty says "I am not overriding this field". A homeserver
+		// then repopulates the member event from the global profile, so the
+		// value it reports is its own doing rather than drift. Recording it
+		// would diff against the configuration on every plan, forever.
+		return managed
+	}
 	if server != "" {
 		return types.StringValue(server)
-	}
-	if !managed.IsNull() && managed.ValueString() == "" {
-		return managed
 	}
 	return types.StringNull()
 }
