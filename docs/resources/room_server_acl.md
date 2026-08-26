@@ -4,22 +4,28 @@ page_title: "matrix_room_server_acl Resource - Matrix"
 subcategory: ""
 description: |-
   Manages the m.room.server_acl state event for a room or space. Lets you block specific homeservers from federating events into the room.
-  Warning — self-lockout risk. A misconfigured ACL can permanently lock the caller's homeserver (and therefore the caller) out of the room: once the ACL blocks your server, you cannot send further events — including a corrective ACL. Recovery requires a homeserver admin to intervene. Before applying: make sure allow either contains your homeserver (or "*") and deny does not match it. This provider emits a plan-time warning if it detects a likely self-lockout, but the final responsibility is yours.
+  Warning: a bad ACL cannot be undone. A homeserver applies this event to the events that arrive from other servers. If the ACL blocks your own server, every remote server rejects this room's events from you, and rejects a corrective ACL too. Your own server still accepts your events, so local users see no change while federation stays broken for good.
+  Before you apply, make sure that allow contains your homeserver or "*", and that deny does not match it. This provider warns at plan time when it detects a likely self-lockout, and refuses a plan that denies every server.
 ---
 
 # matrix_room_server_acl (Resource)
 
 Manages the m.room.server_acl state event for a room or space. Lets you block specific homeservers from federating events into the room.
 
-**Warning — self-lockout risk.** A misconfigured ACL can permanently lock the caller's homeserver (and therefore the caller) out of the room: once the ACL blocks your server, you cannot send further events — including a corrective ACL. Recovery requires a homeserver admin to intervene. Before applying: make sure `allow` either contains your homeserver (or `"*"`) and `deny` does not match it. This provider emits a plan-time warning if it detects a likely self-lockout, but the final responsibility is yours.
+**Warning: a bad ACL cannot be undone.** A homeserver applies this event to the events that arrive from other servers. If the ACL blocks your own server, every remote server rejects this room's events from you, and rejects a corrective ACL too. Your own server still accepts your events, so local users see no change while federation stays broken for good.
+
+Before you apply, make sure that `allow` contains your homeserver or `"*"`, and that `deny` does not match it. This provider warns at plan time when it detects a likely self-lockout, and refuses a plan that denies every server.
 
 ## Example Usage
 
 ```terraform
-# Warning: a misconfigured ACL can irreversibly lock your homeserver out of
-# the room. If allow is non-empty, make sure it matches your own homeserver
-# (literally or via "*"); if deny matches your homeserver, you lose access.
-# Recovery requires a homeserver admin. See the resource docs for details.
+# Warning: a bad ACL cannot be undone. If it blocks your own server, every
+# remote server rejects this room's events from you, and rejects a corrective
+# ACL too. Your own server still accepts your events, so local users see no
+# change while federation stays broken for good.
+#
+# allow must contain your homeserver or "*". An empty or absent allow list
+# denies every server, so this provider refuses that plan.
 resource "matrix_room_server_acl" "example" {
   room_id           = matrix_room.example.id
   allow             = ["*"]
@@ -37,9 +43,13 @@ resource "matrix_room_server_acl" "example" {
 
 ### Optional
 
-- `allow` (Set of String) Allow-list of homeserver globs (e.g. ["*"], or ["matrix.org", "*.example.com"]). If empty or unset, defaults to allowing all.
+- `allow` (Set of String) Allow-list of homeserver globs, for example ["*"] or ["matrix.org", "*.example.com"].
+
+An empty or unset list denies every server, your own included, so use ["*"] to allow all. This provider refuses such a plan.
+
+Matching uses the glob the Matrix specification defines: `*` matches zero or more characters, `?` matches exactly one, every other character is literal, and case is ignored.
 - `allow_ip_literals` (Boolean) Whether server names that are IP literals are permitted. Default: true (per spec).
-- `deny` (Set of String) Deny-list of homeserver globs. Evaluated before allow.
+- `deny` (Set of String) Deny-list of homeserver globs. A homeserver checks this list before allow, so a name that both lists match is denied.
 
 ### Read-Only
 
