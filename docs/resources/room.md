@@ -43,7 +43,7 @@ resource "matrix_room" "example" {
 
 ### Read-Only
 
-- `canonical_alias` (String) Canonical alias currently set on the room.
+- `canonical_alias` (String) Canonical alias currently set on the room. Read only here: a homeserver sets it at creation from `room_alias_name`. To change it afterwards, manage `m.room.canonical_alias` with a `matrix_room_state` resource.
 - `id` (String) Matrix room ID (!abc:server).
 
 ## Import

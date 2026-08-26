@@ -2,7 +2,7 @@ terraform {
   required_providers {
     matrix = {
       source  = "raspbeguy/matrix"
-      version = "~> 0.1"
+      version = "~> 0.4"
     }
   }
 }
