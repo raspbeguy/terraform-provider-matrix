@@ -168,6 +168,12 @@ drift, example formatting, the version constraint in the published example,
 and the acceptance suite against a containerized Synapse). The acceptance workflow also runs nightly, because the Synapse image
 is unpinned.
 
+CI appends `ci/synapse-overrides.yaml` to the generated `homeserver.yaml`
+before it runs the suite. It allows directory publication, which a stock
+Synapse denies, and raises two rate limits that otherwise make the suite spend
+most of its time waiting. Apply the same file to a local homeserver for the
+same result.
+
 `make testacc` needs a homeserver it may pollute. A persistent one works: the
 aliases each test creates are randomised and cleaned up afterwards, so repeated
 runs do not collide. Each run leaves the rooms it made behind, because Matrix

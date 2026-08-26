@@ -3,7 +3,11 @@ package provider
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -132,6 +136,71 @@ func testAccUserID(t *testing.T) string {
 		return v
 	}
 	return string(testAccClient(t).MX.UserID)
+}
+
+// TestEveryClientSetsRetries reads the package's own source.
+//
+// mautrix.NewClient leaves DefaultHTTPRetries at zero, so a client built without
+// setting it gives up on the first 429. That defect happened twice: once in the
+// provider (issue #51) and once in this test harness, and both times the
+// acceptance suite found it by hitting a real rate limit.
+//
+// The CI homeserver no longer rate limits hard enough to find a third, because
+// ci/synapse-overrides.yaml raises the limits so the suite does not spend most
+// of its time waiting. This replaces that accidental coverage with a deliberate
+// check: every function that builds a client must decide what its retries are.
+//
+// Setting it to zero is a valid decision, and two test helpers do exactly that
+// so their request counts stay predictable. What must not happen is saying
+// nothing.
+func TestEveryClientSetsRetries(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no source files found: %v", err)
+	}
+
+	var checked int
+	for _, file := range files {
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			var builds, decides bool
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "mautrix" && sel.Sel.Name == "NewClient" {
+					builds = true
+				}
+				if sel.Sel.Name == "DefaultHTTPRetries" {
+					decides = true
+				}
+				return true
+			})
+			if !builds {
+				continue
+			}
+			checked++
+			if !decides {
+				t.Errorf("%s: %s builds a client and never sets DefaultHTTPRetries, so it gives "+
+					"up on the first rate limit. Set it to matrixHTTPRetries, or to 0 on purpose.",
+					file, fn.Name.Name)
+			}
+		}
+	}
+
+	// A guard that inspects nothing passes for the wrong reason.
+	if checked < 4 {
+		t.Fatalf("only %d client builders inspected; the package has more than that", checked)
+	}
 }
 
 // TestMatrixHTTPRetries guards that the provider retries rate limits at all.

@@ -1,0 +1,34 @@
+
+# Appended to the generated homeserver.yaml before the acceptance suite runs.
+# Everything here is a property of the test environment, not something the
+# suite asserts.
+
+# A stock Synapse denies room directory publication, so a room created with
+# visibility = "public" is not published. That is the default the provider warns
+# about, and the visibility drift test needs a homeserver that allows it, so
+# relax the rule here rather than assert the default.
+room_list_publication_rules:
+  - user_id: "*"
+    alias: "*"
+    room_id: "*"
+    action: allow
+
+# The suite creates about a dozen rooms and sends several state events in each.
+# Synapse allows one room every 62 seconds after a burst of 10, because
+# rc_room_creation defaults to 0.016 per second, and one event every 5 seconds
+# after a burst of 10, because rc_message defaults to 0.2. Both bind well before
+# the suite finishes, and the waiting is most of the difference between a run of
+# 90 seconds and one of 130.
+#
+# Raised rather than switched off, so a runaway loop still trips something.
+#
+# This does cost the suite one incidental property: it used to provoke real 429s
+# and so exercise the provider's retry path. That path has unit tests of its own,
+# which cover more of it than an accidental rate limit ever did, so the trade is
+# worth making. See internal/provider/client_test.go.
+rc_message:
+  per_second: 100
+  burst_count: 1000
+rc_room_creation:
+  per_second: 10
+  burst_count: 100
