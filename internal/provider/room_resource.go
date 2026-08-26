@@ -124,6 +124,9 @@ func (r *roomResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		"canonical_alias": schema.StringAttribute{
 			Computed:    true,
 			Description: "Canonical alias currently set on the room.",
+			// Without this, every plan that carries any change re-marks this
+			// "(known after apply)", which is noise: Read refreshes it anyway.
+			PlanModifiers: keepStr,
 		},
 	}
 

@@ -188,6 +188,11 @@ containerized Synapse.
   `terraform state rm` the resource (drops it from state, leaves the server
   alone) or add `lifecycle { ignore_changes = [membership] }` on the block
   (initial invite still fires, subsequent leaves are ignored).
+- `matrix_space_child` keeps what the space already holds for any of `via`,
+  `order` or `suggested` that you leave out. Always set `via`: the specification
+  requires it, and a link with none of the three looks identical to a removed
+  one, because removal is done by writing empty content. The provider warns at
+  plan time.
 - `matrix_room.visibility` is re-read on every refresh, so a directory change
   made outside Terraform shows as drift. Synapse denies room directory
   publication by default, through its `room_list_publication_rules`, so a room

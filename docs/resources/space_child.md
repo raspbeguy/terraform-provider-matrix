@@ -4,15 +4,25 @@ page_title: "matrix_space_child Resource - Matrix"
 subcategory: ""
 description: |-
   Links a room or space as a child under a parent space (m.space.child).
+  Removing the link is done by writing empty content, which is the convention for m.space.child. A link that ends up with no via, order or suggested is therefore indistinguishable from a removed one, and disappears from state on the next refresh. Always set via.
 ---
 
 # matrix_space_child (Resource)
 
 Links a room or space as a child under a parent space (m.space.child).
 
+Removing the link is done by writing empty content, which is the convention for `m.space.child`. A link that ends up with no `via`, `order` or `suggested` is therefore indistinguishable from a removed one, and disappears from state on the next refresh. Always set `via`.
+
 ## Example Usage
 
 ```terraform
+# via is required by the Matrix specification: without it a client cannot resolve
+# the child room. It also matters here because removing a link is done by writing
+# empty content, so a link with no via, order or suggested looks removed and
+# disappears from state on the next refresh. The provider warns at plan time.
+#
+# Leave order or suggested out and the link keeps whatever the space already
+# holds, rather than clearing it.
 resource "matrix_space_child" "example" {
   parent_space_id = matrix_space.engineering.id
   child_room_id   = matrix_room.backend.id
@@ -32,9 +42,9 @@ resource "matrix_space_child" "example" {
 
 ### Optional
 
-- `order` (String) Lexicographic ordering string.
-- `suggested` (Boolean) Whether clients should suggest the child to users.
-- `via` (Set of String) Servers to use when joining the child.
+- `order` (String) Lexicographic ordering string. Leave it out and the link keeps whatever the space already holds.
+- `suggested` (Boolean) Whether clients should suggest the child to users. Leave it out and the link keeps whatever the space already holds.
+- `via` (Set of String) Servers to use when joining the child. The Matrix specification requires this: without it a client cannot resolve the child room. Leave it out and the link keeps whatever the space already holds.
 
 ### Read-Only
 
