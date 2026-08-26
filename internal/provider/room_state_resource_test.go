@@ -18,7 +18,7 @@ import (
 // typed resource, so an event type that is covered must be refused.
 func TestRoomStateOwnershipDiag(t *testing.T) {
 	// A loop over an empty table passes without testing anything.
-	if len(stateEventOwners) < 10 {
+	if len(stateEventOwners) < 9 {
 		t.Fatalf("stateEventOwners has %d rows; the provider models more than that", len(stateEventOwners))
 	}
 	for eventType, owner := range stateEventOwners {
@@ -141,10 +141,11 @@ func TestStateEventOwnersIsComplete(t *testing.T) {
 	}
 
 	// A guard that inspects nothing passes for the wrong reason. Every entry in
-	// the table is reachable this way, so anything less means the scan broke.
-	if len(sent) < len(stateEventOwners) {
-		t.Fatalf("found %d state events in the source but the table has %d rows; the scan is "+
-			"missing call sites it used to see", len(sent), len(stateEventOwners))
+	// both tables is reachable this way, so anything less means the scan broke.
+	want := len(stateEventOwners) + len(readOnlyStateEvents)
+	if len(sent) < want {
+		t.Fatalf("found %d state events in the source but the tables hold %d; the scan is "+
+			"missing call sites it used to see", len(sent), want)
 	}
 
 	byConstant := map[string]string{
@@ -169,9 +170,15 @@ func TestStateEventOwnersIsComplete(t *testing.T) {
 				constant, files)
 			continue
 		}
-		if _, owned := stateEventOwners[eventType]; !owned {
-			t.Errorf("%s (%s) is used by %v but is missing from stateEventOwners, so "+
-				"matrix_room_state can own it too (issue #58).", constant, eventType, files)
+		_, owned := stateEventOwners[eventType]
+		_, exempt := readOnlyStateEvents[eventType]
+		if !owned && !exempt {
+			t.Errorf("%s (%s) is used by %v but appears in neither stateEventOwners nor "+
+				"readOnlyStateEvents, so matrix_room_state can own it too (issue #58). Add it to "+
+				"the owner table, or exempt it with a reason.", constant, eventType, files)
+		}
+		if owned && exempt {
+			t.Errorf("%s (%s) is in both tables; an event is either owned or exempt", constant, eventType)
 		}
 	}
 }

@@ -250,6 +250,15 @@ whether the homeserver lists rooms in its public directory.
   accepts your events, so local users see no change. The provider refuses a
   plan whose `allow` list denies every server, and warns when it detects a
   likely self-lockout. Check `allow` and `deny` before you apply.
+- `matrix_room_alias` moves an alias by removing the mapping and creating it
+  again, because an alias points at one room. A failed second step puts the old
+  mapping back. A refresh that cannot reach the homeserver is an error rather
+  than a missing alias, so a proxy restart cannot drop the resource from state.
+- Destroying an alias that a room advertises in `m.room.canonical_alias` is
+  usually safe: a homeserver removes it from that event by itself. It does so
+  only if the account may send the event, and it deletes the alias either way.
+  The provider warns at plan time when the account lacks the level, because the
+  room would then advertise an address that no longer resolves.
 - `matrix_room_state` refuses an event type that a typed resource owns, and
   names the resource to use instead. Two resources cannot own one event: each
   apply writes one value, each refresh reads the other, and the plan never
