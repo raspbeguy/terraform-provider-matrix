@@ -63,6 +63,40 @@ func TestNotFoundErr(t *testing.T) {
 	}
 }
 
+// TestForbiddenErr pins what counts as "the homeserver will not show me this",
+// which is the one state-read failure the room data source may answer with a
+// null. Everything else it must report, or a plan removes a name because a
+// gateway was restarting. See issue #60.
+func TestForbiddenErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			// What Synapse answers a non-member reading room state, from
+			// check_user_in_room_or_world_readable.
+			name: "not in the room: 403 with M_FORBIDDEN",
+			err:  httpErr(http.StatusForbidden, "M_FORBIDDEN"), want: true,
+		},
+		{name: "403 with another errcode", err: httpErr(http.StatusForbidden, "M_GUEST_ACCESS_FORBIDDEN"), want: true},
+		{name: "403 with no errcode", err: httpErr(http.StatusForbidden, ""), want: true},
+		{name: "M_FORBIDDEN at another status", err: httpErr(http.StatusBadRequest, "M_FORBIDDEN"), want: true},
+		{name: "a missing event is not a refusal", err: httpErr(http.StatusNotFound, "M_NOT_FOUND")},
+		{name: "a gateway error is not a refusal", err: httpErr(http.StatusBadGateway, "M_UNKNOWN")},
+		{name: "a rate limit is not a refusal", err: httpErr(http.StatusTooManyRequests, "M_LIMIT_EXCEEDED")},
+		{name: "a transport failure is not a refusal", err: errors.New("connection reset")},
+		{name: "no error at all", err: nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := forbiddenErr(c.err); got != c.want {
+				t.Errorf("forbiddenErr = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestAmbiguousErr pins which failures leave it unknown whether the homeserver
 // did the work. Only those may carry the warning that a room might exist. See
 // issue #55: the warning used to go out with every create failure, including a

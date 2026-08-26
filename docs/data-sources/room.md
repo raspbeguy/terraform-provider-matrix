@@ -3,12 +3,18 @@
 page_title: "matrix_room Data Source - Matrix"
 subcategory: ""
 description: |-
-  Resolves a Matrix room by alias. State attributes are best-effort and require the caller to be a member.
+  Resolves a Matrix room by alias.
+  name, topic and avatar_url are read from room state, which a homeserver shows to a member of the room, and to anyone when the room's history visibility is world_readable. They are null when the homeserver refuses to show them, and null when the room does not set them.
+  Any other failure to read them is an error. A data source has no earlier value to fall back on, so a null it reports flows into whatever consumes it, and a plan that removes a name because a gateway was restarting looks exactly like one that removes it on purpose.
 ---
 
 # matrix_room (Data Source)
 
-Resolves a Matrix room by alias. State attributes are best-effort and require the caller to be a member.
+Resolves a Matrix room by alias.
+
+`name`, `topic` and `avatar_url` are read from room state, which a homeserver shows to a member of the room, and to anyone when the room's history visibility is `world_readable`. They are null when the homeserver refuses to show them, and null when the room does not set them.
+
+Any other failure to read them is an error. A data source has no earlier value to fall back on, so a null it reports flows into whatever consumes it, and a plan that removes a name because a gateway was restarting looks exactly like one that removes it on purpose.
 
 ## Example Usage
 
