@@ -163,8 +163,15 @@ See each resource's docs page for the exact ID format.
 | `make vet` | `go vet ./...` |
 
 Contributions welcome. CI runs on every PR (build, vet, lint, tests, docs
-drift, example formatting). A nightly acceptance workflow runs against a
-containerized Synapse.
+drift, example formatting, and the acceptance suite against a containerized
+Synapse). The acceptance workflow also runs nightly, because the Synapse image
+is unpinned.
+
+`make testacc` needs a homeserver it may pollute. A persistent one works: the
+aliases each test creates are randomised and cleaned up afterwards, so repeated
+runs do not collide. Each run leaves one room per test behind, because Matrix
+has no way to delete a room and destroy only makes the account leave. Purging
+them needs the admin API.
 
 ## Caveats
 

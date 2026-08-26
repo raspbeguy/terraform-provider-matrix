@@ -248,7 +248,10 @@ func testAccCheckGlobalDisplayName(t *testing.T, roomResourceName, wantAvatar st
 // the user's per-room avatar with nothing in the configuration asking for it.
 func TestAccUserProfileOverride_LeavesUndeclaredFieldAlone(t *testing.T) {
 	testAccSkipUnlessAcc(t)
-	const avatar = "mxc://localhost/tfaccoverride"
+	// The server part comes from the caller rather than the CI container's name.
+	// A member event's avatar is never resolved by this test, so it is inert
+	// either way, but a literal "localhost" is wrong on a real homeserver.
+	avatar := "mxc://" + homeserverFromMXID(testAccUserID(t)) + "/tfaccoverride"
 
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
