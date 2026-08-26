@@ -4,10 +4,13 @@ import (
 	"context"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
@@ -19,6 +22,7 @@ var (
 	_ resource.Resource                = &spaceChildResource{}
 	_ resource.ResourceWithConfigure   = &spaceChildResource{}
 	_ resource.ResourceWithImportState = &spaceChildResource{}
+	_ resource.ResourceWithModifyPlan  = &spaceChildResource{}
 )
 
 type spaceChildResource struct {
@@ -42,8 +46,17 @@ func (r *spaceChildResource) Metadata(_ context.Context, req resource.MetadataRe
 
 func (r *spaceChildResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	forceNew := []planmodifier.String{stringplanmodifier.RequiresReplace()}
+	// The content fields are Optional+Computed: leaving one out keeps whatever the
+	// space already holds, and UseStateForUnknown stops that value planning as a
+	// change on every run. suggested is the one that bit: an m.space.child with no
+	// suggested key reads back as false, so an omitted attribute planned
+	// false -> null forever and an import never finished. See issue #40.
+	keepStr := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
+	keepBool := []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}
+	keepSet := []planmodifier.Set{setplanmodifier.UseStateForUnknown()}
 	resp.Schema = schema.Schema{
-		Description: "Links a room or space as a child under a parent space (m.space.child).",
+		Description: "Links a room or space as a child under a parent space (m.space.child).\n\n" +
+			"Removing the link is done by writing empty content, which is the convention for `m.space.child`. A link that ends up with no `via`, `order` or `suggested` is therefore indistinguishable from a removed one, and disappears from state on the next refresh. Always set `via`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -52,9 +65,18 @@ func (r *spaceChildResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			},
 			"parent_space_id": schema.StringAttribute{Required: true, PlanModifiers: forceNew, Description: "Space room ID that acts as parent."},
 			"child_room_id":   schema.StringAttribute{Required: true, PlanModifiers: forceNew, Description: "Room/space ID to include as child."},
-			"via":             schema.SetAttribute{ElementType: types.StringType, Optional: true, Description: "Servers to use when joining the child."},
-			"order":           schema.StringAttribute{Optional: true, Description: "Lexicographic ordering string."},
-			"suggested":       schema.BoolAttribute{Optional: true, Description: "Whether clients should suggest the child to users."},
+			"via": schema.SetAttribute{
+				ElementType: types.StringType, Optional: true, Computed: true, PlanModifiers: keepSet,
+				Description: "Servers to use when joining the child. The Matrix specification requires this: without it a client cannot resolve the child room. Leave it out and the link keeps whatever the space already holds.",
+			},
+			"order": schema.StringAttribute{
+				Optional: true, Computed: true, PlanModifiers: keepStr,
+				Description: "Lexicographic ordering string. Leave it out and the link keeps whatever the space already holds.",
+			},
+			"suggested": schema.BoolAttribute{
+				Optional: true, Computed: true, PlanModifiers: keepBool,
+				Description: "Whether clients should suggest the child to users. Leave it out and the link keeps whatever the space already holds.",
+			},
 		},
 	}
 }
@@ -84,19 +106,115 @@ func buildSpaceChildContent(ctx context.Context, m *spaceChildModel) (*event.Spa
 	return c, nil
 }
 
+// modelFromSpaceChild maps event content into the model's three content fields.
+// Shared by Read and by the unknown resolution, so both agree on what an absent
+// key means.
+func modelFromSpaceChild(ctx context.Context, c *event.SpaceChildEventContent, m *spaceChildModel) error {
+	if len(c.Via) == 0 {
+		m.Via = types.SetNull(types.StringType)
+	} else {
+		via, d := types.SetValueFrom(ctx, types.StringType, c.Via)
+		if d.HasError() {
+			return errorFromDiags(d)
+		}
+		m.Via = via
+	}
+	if c.Order == "" {
+		m.Order = types.StringNull()
+	} else {
+		m.Order = types.StringValue(c.Order)
+	}
+	m.Suggested = types.BoolValue(c.Suggested)
+	return nil
+}
+
+// resolveUnknownSpaceChild fills in only the attributes the plan left unknown,
+// from the content just sent.
+//
+// Anything the plan already decided is kept: Terraform rejects an applied value
+// that differs from a known planned value. Being Computed is what makes this
+// necessary, and skipping it is what broke Create in issue #29.
+func resolveUnknownSpaceChild(ctx context.Context, c *event.SpaceChildEventContent, m *spaceChildModel) error {
+	var sent spaceChildModel
+	if err := modelFromSpaceChild(ctx, c, &sent); err != nil {
+		return err
+	}
+	if m.Via.IsUnknown() {
+		m.Via = sent.Via
+	}
+	if m.Order.IsUnknown() {
+		m.Order = sent.Order
+	}
+	if m.Suggested.IsUnknown() {
+		m.Suggested = sent.Suggested
+	}
+	return nil
+}
+
+// applySpaceChild builds the content, sends it, and resolves what the plan left
+// unknown. Mirrors applyPowerLevels.
+//
+// Resolving from the content just sent rather than a second read is deliberate:
+// Matrix stores state event content verbatim, so a read back returns what was
+// sent, one round trip later and open to a read-your-writes race.
+func (r *spaceChildResource) applySpaceChild(ctx context.Context, m *spaceChildModel, diags *diag.Diagnostics) {
+	content, err := buildSpaceChildContent(ctx, m)
+	if err != nil {
+		diags.AddError("Invalid space_child attributes", err.Error())
+		return
+	}
+	if err := sendState(ctx, r.client, id.RoomID(m.ParentSpaceID.ValueString()), event.StateSpaceChild, m.ChildRoomID.ValueString(), content); err != nil {
+		diags.AddError("Failed to set m.space.child", err.Error())
+		return
+	}
+	if err := resolveUnknownSpaceChild(ctx, content, m); err != nil {
+		diags.AddError("Failed to map m.space.child into state", err.Error())
+	}
+}
+
+// spaceChildMissingVia reports whether the link will end up with no via. Pure
+// function — no client/network access.
+//
+// The configuration matters as much as the plan. On a create that declares
+// nothing, via is unknown and UseStateForUnknown cannot help, so the plan alone
+// cannot tell "not declared" from "will be computed". A null configuration is
+// exactly the case worth warning about.
+func spaceChildMissingVia(planVia, configVia types.Set) bool {
+	if planVia.IsUnknown() {
+		return configVia.IsNull()
+	}
+	return planVia.IsNull() || len(planVia.Elements()) == 0
+}
+
+// ModifyPlan warns before an apply produces a link no client can resolve.
+func (r *spaceChildResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return // destroy plan
+	}
+	var plan, config spaceChildModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !spaceChildMissingVia(plan.Via, config.Via) {
+		return
+	}
+	resp.Diagnostics.AddAttributeWarning(path.Root("via"), "Space child has no via",
+		"The Matrix specification requires `via` on an m.space.child event: without it a client "+
+			"cannot resolve the child room, so the link does nothing. A link with no `via`, `order` "+
+			"or `suggested` is also indistinguishable from a removed one, because removal is done by "+
+			"writing empty content, so it disappears from state on the next refresh.")
+}
+
 func (r *spaceChildResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan spaceChildModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	content, err := buildSpaceChildContent(ctx, &plan)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid space_child attributes", err.Error())
-		return
-	}
-	if err := sendState(ctx, r.client, id.RoomID(plan.ParentSpaceID.ValueString()), event.StateSpaceChild, plan.ChildRoomID.ValueString(), content); err != nil {
-		resp.Diagnostics.AddError("Failed to set m.space.child", err.Error())
+	r.applySpaceChild(ctx, &plan, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	plan.ID = types.StringValue(plan.ParentSpaceID.ValueString() + "|" + plan.ChildRoomID.ValueString())
@@ -120,19 +238,10 @@ func (r *spaceChildResource) Read(ctx context.Context, req resource.ReadRequest,
 		resp.State.RemoveResource(ctx)
 		return
 	}
-	if len(c.Via) == 0 {
-		state.Via = types.SetNull(types.StringType)
-	} else {
-		via, d := types.SetValueFrom(ctx, types.StringType, c.Via)
-		resp.Diagnostics.Append(d...)
-		state.Via = via
+	if err := modelFromSpaceChild(ctx, &c, &state); err != nil {
+		resp.Diagnostics.AddError("Failed to map m.space.child into state", err.Error())
+		return
 	}
-	if c.Order == "" {
-		state.Order = types.StringNull()
-	} else {
-		state.Order = types.StringValue(c.Order)
-	}
-	state.Suggested = types.BoolValue(c.Suggested)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -144,13 +253,8 @@ func (r *spaceChildResource) Update(ctx context.Context, req resource.UpdateRequ
 		return
 	}
 	plan.ID = prior.ID
-	content, err := buildSpaceChildContent(ctx, &plan)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid space_child attributes", err.Error())
-		return
-	}
-	if err := sendState(ctx, r.client, id.RoomID(plan.ParentSpaceID.ValueString()), event.StateSpaceChild, plan.ChildRoomID.ValueString(), content); err != nil {
-		resp.Diagnostics.AddError("Failed to update m.space.child", err.Error())
+	r.applySpaceChild(ctx, &plan, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)

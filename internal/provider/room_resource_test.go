@@ -607,3 +607,37 @@ func TestAccRoom_VisibilityDriftIsDetected(t *testing.T) {
 		},
 	})
 }
+
+// TestCanonicalAliasKeepsStateForUnknown guards a Computed attribute that had no
+// plan modifier, so every plan carrying any change re-marked it
+// "(known after apply)". Read refreshes it anyway, so that was pure noise.
+func TestCanonicalAliasKeepsStateForUnknown(t *testing.T) {
+	for _, isSpace := range []bool{false, true} {
+		name := "room"
+		if isSpace {
+			name = "space"
+		}
+		t.Run(name, func(t *testing.T) {
+			sa, ok := roomSchema(t, isSpace).Attributes["canonical_alias"].(schema.StringAttribute)
+			if !ok {
+				t.Fatal("canonical_alias is not a StringAttribute")
+			}
+			if len(sa.PlanModifiers) == 0 {
+				t.Fatal("canonical_alias has no plan modifiers, want UseStateForUnknown")
+			}
+			// A known prior value must survive into the plan rather than going unknown.
+			resp := &planmodifier.StringResponse{PlanValue: types.StringUnknown()}
+			for _, mod := range sa.PlanModifiers {
+				mod.PlanModifyString(context.Background(), planmodifier.StringRequest{
+					State:      tfsdk.State{Raw: tftypes.NewValue(tftypes.String, "x")},
+					Plan:       tfsdk.Plan{Raw: tftypes.NewValue(tftypes.String, "y")},
+					StateValue: types.StringValue("#room:example.com"),
+					PlanValue:  resp.PlanValue,
+				}, resp)
+			}
+			if resp.PlanValue.IsUnknown() {
+				t.Error("a known prior canonical_alias must survive the plan, not go unknown")
+			}
+		})
+	}
+}
