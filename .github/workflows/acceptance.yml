@@ -37,14 +37,13 @@ jobs:
       - name: Start Synapse
         run: docker compose -f ci/compose.synapse.yml up -d
 
-      # A stock Synapse denies room directory publication, so a room created
-      # with visibility = "public" is not published. That is the default the
-      # provider warns about, and the drift test needs a homeserver that allows
-      # it, so relax the rule here rather than assert the default.
-      - name: Allow room directory publication
+      # Directory publication and the rate limits are properties of the test
+      # environment rather than anything the suite asserts. ci/synapse-overrides.yaml
+      # says what each one is for.
+      - name: Configure Synapse for the suite
         run: |
-          docker compose -f ci/compose.synapse.yml exec -T synapse sh -c \
-            'printf "\nroom_list_publication_rules:\n  - user_id: \"*\"\n    alias: \"*\"\n    room_id: \"*\"\n    action: allow\n" >> /data/homeserver.yaml'
+          docker compose -f ci/compose.synapse.yml exec -T synapse \
+            sh -c 'cat >> /data/homeserver.yaml' < ci/synapse-overrides.yaml
           docker compose -f ci/compose.synapse.yml restart synapse
 
       - name: Wait for Synapse
