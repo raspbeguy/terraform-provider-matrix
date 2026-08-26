@@ -235,9 +235,10 @@ func TestAccUserProfileOverride_LeavesUndeclaredFieldAlone(t *testing.T) {
 				// Create the room and seed an avatar the apply could strip.
 				Config: testAccOverrideConfig("Terrabot"),
 				Check:  testAccSeedMemberAvatar(t, "matrix_room.test", avatar),
-				// The seed lands after this step's own apply, so its follow-up
-				// plan sees the drift. The assertions are in the next step.
-				ExpectNonEmptyPlan: true,
+				// No ExpectNonEmptyPlan here, and that is the point. avatar_url is
+				// not declared, so Read does not refresh it and the seed creates no
+				// drift. On a Config step the flag *requires* a non-empty plan, so
+				// setting it would fail. The assertions are in the next step.
 			},
 			{
 				// The override declares display_name only, so the avatar stays.
