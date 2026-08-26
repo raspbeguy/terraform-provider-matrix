@@ -45,9 +45,21 @@ var stateEventOwners = map[string]string{
 	event.StateTopic.Type:             "matrix_room or matrix_space",
 	event.StateRoomAvatar.Type:        "matrix_room or matrix_space",
 	event.StateHistoryVisibility.Type: "matrix_room or matrix_space",
-	event.StateCanonicalAlias.Type:    "matrix_room or matrix_space",
 	event.StateEncryption.Type:        "matrix_room or matrix_space",
 	event.StateCreate.Type:            "matrix_room or matrix_space",
+}
+
+// readOnlyStateEvents are events the provider reads but no resource writes, so
+// matrix_room_state may manage them. An entry here is a deliberate exemption
+// from stateEventOwners and needs a reason.
+//
+// m.room.canonical_alias: matrix_room exposes it as a computed attribute and
+// never writes it, and matrix_room_alias manages the directory mapping rather
+// than this event. So nothing else can fight over it, and refusing it would
+// leave nobody able to repair a room that advertises a dead alias, which is the
+// very thing matrix_room_alias now warns about. See issue #59.
+var readOnlyStateEvents = map[string]string{
+	event.StateCanonicalAlias.Type: "read by matrix_room, written by no resource",
 }
 
 // clearingLocksRoom reports why an event type must never have its content

@@ -4,11 +4,20 @@ page_title: "matrix_room_alias Resource - Matrix"
 subcategory: ""
 description: |-
   Maps an alias (#name:server) to a room in the homeserver's directory.
+  An alias points at one room, so a change to room_id removes the mapping and creates it again. If the second step fails, the provider puts the old mapping back and says so. If that fails too, the alias is gone, and the error says what to do.
+  A refresh that cannot reach the homeserver is an error, not a missing alias. Only a 404 drops the resource from state.
+  Destroying an alias that a room advertises in m.room.canonical_alias is usually safe, because a homeserver removes it from that event by itself. It does so only if the account may send the event, and it deletes the alias either way. So the provider warns at plan time when the account lacks the power level, and the room would be left advertising an address that no longer resolves.
 ---
 
 # matrix_room_alias (Resource)
 
 Maps an alias (#name:server) to a room in the homeserver's directory.
+
+An alias points at one room, so a change to `room_id` removes the mapping and creates it again. If the second step fails, the provider puts the old mapping back and says so. If that fails too, the alias is gone, and the error says what to do.
+
+A refresh that cannot reach the homeserver is an error, not a missing alias. Only a 404 drops the resource from state.
+
+Destroying an alias that a room advertises in `m.room.canonical_alias` is usually safe, because a homeserver removes it from that event by itself. It does so only if the account may send the event, and it deletes the alias either way. So the provider warns at plan time when the account lacks the power level, and the room would be left advertising an address that no longer resolves.
 
 ## Example Usage
 
