@@ -2,6 +2,8 @@ module github.com/raspbeguy/terraform-provider-matrix
 
 go 1.26.1
 
+toolchain go1.26.11
+
 require (
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-go v0.31.0
